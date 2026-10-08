@@ -1,0 +1,8 @@
+# Generated outputs stay on disk only.
+runs/
+services/
+planner_head/data/
+*.log
+*.pid
+*.env
+__pycache__/
