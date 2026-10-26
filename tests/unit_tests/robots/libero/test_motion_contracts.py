@@ -61,7 +61,7 @@ def test_move_to_finishes_yaw_even_after_position_converges(target_xyz):
     assert len(env.actions) > 1
     assert abs(env.yaw - 0.8) < 0.02
     assert np.linalg.norm(env.xyz - np.asarray(target_xyz)) < 0.012
-    assert abs(result["final_yaw_error_rad"]) < 0.02
+    assert abs(result["yaw_error"]) < 0.02
 
 
 def test_move_to_takes_shortest_yaw_path_across_pi():
@@ -69,7 +69,7 @@ def test_move_to_takes_shortest_yaw_path_across_pi():
     result = primitives(env).move_to([0, 0, 0], target_yaw=-np.pi + 0.03).data
     assert len(env.actions) == 1
     assert env.actions[0][5] > 0
-    assert abs(result["final_yaw_error_rad"]) < 0.02
+    assert abs(result["yaw_error"]) < 0.02
 
 
 def test_position_only_move_does_not_read_orientation():
@@ -80,9 +80,9 @@ def test_position_only_move_does_not_read_orientation():
 
     env.raw_obs = unexpected
     result = primitives(env).move_to([0.05, 0, 0]).data
-    assert result["final_dist_m"] < 0.012
+    assert result["dist_m"] < 0.012
     assert all(action[5] == 0 for action in env.actions)
-    assert "final_yaw_error_rad" not in result
+    assert "yaw_error" not in result
 
 
 @pytest.mark.parametrize("terminal", ["terminated", "truncated"])
@@ -97,10 +97,10 @@ def test_yaw_control_respects_budget_and_requested_tolerance():
     env = MotionEnv()
     result = primitives(env).move_to([0, 0, 0], target_yaw=0.8, max_steps=2).data
     assert len(env.actions) == 2
-    assert result["final_yaw_error_rad"] > 0.5
+    assert result["yaw_error"] > 0.5
     result = primitives(env).move_to([0, 0, 0], target_yaw=0.21, yaw_tol=0.03).data
     assert len(env.actions) == 2
-    assert abs(result["final_yaw_error_rad"]) < 0.03
+    assert abs(result["yaw_error"]) < 0.03
 
 
 @pytest.mark.parametrize("yaw_tol", [0, -0.1, np.nan, np.inf])
@@ -136,7 +136,7 @@ def test_vertical_x_axis_returns_error_even_at_target(projection, max_steps):
     assert result["name"] == "move_to"
     assert "nearly vertical" in result["error"]
     assert "1e-6" in result["error"]
-    assert "final_yaw_error_rad" not in result
+    assert "yaw_error" not in result
     assert not env.actions
 
 
@@ -153,7 +153,7 @@ def test_yaw_becoming_degenerate_stops_without_reporting_convergence(
     )
     assert result["name"] == "move_to"
     assert "nearly vertical" in result["error"]
-    assert "final_yaw_error_rad" not in result
+    assert "yaw_error" not in result
     assert len(env.actions) == 1
 
 
@@ -161,5 +161,5 @@ def test_yaw_projection_above_threshold_is_accepted():
     env = TiltingMotionEnv(2e-6)
     result = primitives(env).move_to([0, 0, 0], target_yaw=0.0).data
     assert "error" not in result
-    assert result["final_yaw_error_rad"] == 0.0
+    assert result["yaw_error"] == 0.0
     assert not env.actions

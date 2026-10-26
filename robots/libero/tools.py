@@ -31,6 +31,16 @@ from rpent.robots.components.pi05_vla_client import Pi05VLAClient
 from rpent.robots.components.sam3_client import Sam3Client
 from rpent.session import EnvState, StepRecord
 from rpent.tools import Tool, ToolResult, tool
+from rpent.tools.core import (
+    CameraView,
+    GripperMode,
+    GripperTarget,
+    WorldXYZ,
+    motion_result,
+    observation_result,
+    stop_reason,
+    wrap_angle,
+)
 from rpent.utils.logging import get_logger
 
 logger = get_logger("libero_tools")
@@ -326,30 +336,56 @@ class LiberoPrimitives:
             }
         )
 
+    def _gripper_action(self, gripper: GripperMode) -> float:
+        """Native gripper command; ``0`` keeps the current command."""
+        return {"hold": 0.0, "open": -1.0, "close": 1.0}[gripper]
+
+    def _gripper_opening(self) -> float:
+        """Finger separation as a fraction of the ~0.08 m fully open width."""
+        return self._last_obs_gripper / 0.08
+
+    def _motion_result(
+        self, *, reached: bool, steps_used: int, **extra: Any
+    ) -> ToolResult:
+        terminated = bool(self.env.terminated)
+        truncated = bool(self.env.truncated)
+        return motion_result(
+            ok=reached,
+            stop_reason=stop_reason(
+                reached=reached, terminated=terminated, truncated=truncated
+            ),
+            steps_used=steps_used,
+            eef_xyz=self._last_obs_eef_pos,
+            gripper_opening=self._gripper_opening(),
+            terminated=terminated,
+            truncated=truncated,
+            **extra,
+        )
+
     @tool
     def move_to(
         self,
-        xyz: Annotated[list[float], Field(min_length=3, max_length=3)],
+        xyz: WorldXYZ,
         *,
+        gripper: GripperMode = "hold",
+        target_yaw: float | None = None,
         max_steps: int = 80,
-        gripper: float = -1.0,
         step_clip: float = 0.025,
         tol: float = 0.012,
         action_scale: float = 0.05,
-        target_yaw: float | None = None,
         yaw_step_clip: float = 0.1,
         yaw_tol: float = 0.02,
     ) -> ToolResult:
-        """Scripted EEF servo to a world-frame XYZ target via the OSC controller. Holds orientation unless target_yaw is supplied; then both position and yaw must converge. Use rotate_pitch or move_pose for pitch changes. gripper: -1 = open, +1 = close. NEVER command a single move_to with |Δxy| > 0.30 — OSC flips IK and the run corrupts; split long traversal into 2-3 mid waypoints at carry z.
+        """Scripted EEF servo to a world-frame XYZ target via the OSC controller. Holds orientation unless target_yaw is supplied; then both position and yaw must converge. Use rotate_pitch or move_pose for pitch changes. NEVER command a single move_to with |Δxy| > 0.30 — OSC flips IK and the run corrupts; split long traversal into 2-3 mid waypoints at carry z.
 
         Args:
             xyz: World-frame target [x, y, z] in meters
-            gripper: Gripper command: -1 open, +1 close (default -1)
-            tol: Position tolerance, m (default 0.012)
-            step_clip: Per-step Δxyz cap before action_scale, m (default 0.025)
-            max_steps: Step budget (default 80)
-            action_scale: OSC action scale (default 0.05)
+            gripper: 'hold' keeps the current gripper command (default), 'open' opens, 'close' closes
             target_yaw: Optional world-frame yaw target in radians
+            max_steps: Step budget (default 80)
+            step_clip: Per-step Δxyz cap before action_scale, m (default 0.025)
+            tol: Position tolerance, m (default 0.012)
+            action_scale: OSC action scale (default 0.05)
             yaw_step_clip: Per-step yaw clip, rad (default 0.10)
             yaw_tol: Positive finite yaw tolerance, rad (default 0.02)
         """
@@ -374,21 +410,14 @@ class LiberoPrimitives:
                 )
             # World yaw; Euler zyx reverses its sign for gripper-down poses.
             yaw = float(np.arctan2(matrix[1, 0], matrix[0, 0]))
-            return (float(target_yaw) - yaw + np.pi) % (2 * np.pi) - np.pi
+            return wrap_angle(float(target_yaw) - yaw)
 
         target = np.asarray(_normalize_xyz(xyz), dtype=np.float32)
-        traj = []
-        for step in range(max_steps):
-            cur = self._last_obs_eef_pos
-            diff = target - cur
+        grip = self._gripper_action(gripper)
+        steps_used = 0
+        for _ in range(max_steps):
+            diff = target - self._last_obs_eef_pos
             dist = float(np.linalg.norm(diff))
-            traj.append(
-                {
-                    "step": step,
-                    "eef_pos": [round(float(x), 4) for x in cur],
-                    "dist_to_target_m": round(dist, 4),
-                }
-            )
             err = yaw_error() if target_yaw is not None else 0.0
             if isinstance(err, ToolResult):
                 return err
@@ -401,49 +430,43 @@ class LiberoPrimitives:
             if target_yaw is not None:
                 step_dyaw = float(np.clip(err, -yaw_step_clip, yaw_step_clip))
                 action[5] = float(np.clip(step_dyaw / 0.10, -1.0, 1.0))
-            action[6] = gripper
+            action[6] = grip
             self._step_env(action)
+            steps_used += 1
             if self.env.terminated or self.env.truncated:
                 break
-        final = self._last_obs_eef_pos
-        result = ToolResult(
-            data={
-                "name": "move_to",
-                "target_xyz": [float(x) for x in target],
-                "final_eef_pos": [round(float(x), 4) for x in final],
-                "final_dist_m": round(float(np.linalg.norm(target - final)), 4),
-                "steps_used": len(traj),
-                "max_steps": max_steps,
-                "terminated": self.env.terminated,
-                "truncated": self.env.truncated,
-            }
-        )
-
+        dist = float(np.linalg.norm(target - self._last_obs_eef_pos))
+        final_yaw_error = None
         if target_yaw is not None:
-            err = yaw_error()
-            if isinstance(err, ToolResult):
-                return err
-            result.data["final_yaw_error_rad"] = round(float(err), 4)
-        return result
+            final_yaw_error = yaw_error()
+            if isinstance(final_yaw_error, ToolResult):
+                return final_yaw_error
+        return self._motion_result(
+            reached=dist < tol
+            and (final_yaw_error is None or abs(final_yaw_error) < yaw_tol),
+            steps_used=steps_used,
+            dist_m=dist,
+            yaw_error=final_yaw_error,
+        )
 
     @tool
     def rotate_wrist(
         self,
         *,
-        target_yaw: float | None = None,
         delta_yaw: float | None = None,
-        gripper: float = 1.0,
+        target_yaw: float | None = None,
+        gripper: GripperMode = "hold",
         max_steps: int = 40,
         tol: float = 0.02,
         step_clip: float = 0.1,
         pos_tol: float = 0.03,
     ) -> ToolResult:
-        """Rotate the wrist around the world Z-axis. Provide either target_yaw (absolute) or delta_yaw (relative). Holds xyz fixed by servoing back to the entry pose; the result carries converged, position_hold_ok, and max_pos_drift_m.
+        """Rotate the wrist around the world Z-axis. Provide either delta_yaw (relative) or target_yaw (absolute). Holds xyz fixed by servoing back to the entry pose; the result carries position_hold_ok and max_pos_drift_m.
 
         Args:
-            target_yaw: Absolute world-frame yaw target, rad
             delta_yaw: Relative yaw delta, rad
-            gripper: Gripper command held during rotation (default +1)
+            target_yaw: Absolute world-frame yaw target, rad
+            gripper: 'hold' keeps the current gripper command (default), 'open' opens, 'close' closes
             max_steps: Step budget (default 40)
             tol: Yaw tolerance, rad (default 0.02)
             step_clip: Per-step yaw clip, rad (default 0.10)
@@ -475,6 +498,7 @@ class LiberoPrimitives:
         if target_yaw is None:
             target_yaw = start_yaw + float(delta_yaw)
         hold_xyz = np.array(self._last_obs_eef_pos, dtype=np.float32, copy=True)
+        grip = self._gripper_action(gripper)
         max_drift = 0.0
 
         def _record_drift() -> None:
@@ -483,15 +507,11 @@ class LiberoPrimitives:
             if drift > max_drift:
                 max_drift = drift
 
-        traj = []
-        for step in range(max_steps):
+        steps_used = 0
+        for _ in range(max_steps):
             _record_drift()
             raw = self.env.raw_obs()
-            cur_yaw = _yaw_of(raw["robot0_eef_quat"])
-            err = float(target_yaw - cur_yaw)
-            # wrap to [-pi, pi]
-            err = (err + np.pi) % (2 * np.pi) - np.pi
-            traj.append({"step": step, "yaw": round(cur_yaw, 4), "err": round(err, 4)})
+            err = wrap_angle(target_yaw - _yaw_of(raw["robot0_eef_quat"]))
             if abs(err) < tol:
                 break
             cur_xyz = self._last_obs_eef_pos
@@ -499,28 +519,24 @@ class LiberoPrimitives:
             action = np.zeros(7, dtype=np.float32)
             action[:3] = np.clip((hold_xyz - cur_xyz) / action_scale, -1.0, 1.0)
             action[5] = float(np.clip(step_dyaw / rot_scale, -1.0, 1.0))
-            action[6] = float(gripper)
+            action[6] = grip
             self._step_env(action)
+            steps_used += 1
             if self.env.terminated or self.env.truncated:
                 break
         final_yaw = _yaw_of(self.env.raw_obs()["robot0_eef_quat"])
-        final_err = float((target_yaw - final_yaw + np.pi) % (2 * np.pi) - np.pi)
+        final_err = wrap_angle(target_yaw - final_yaw)
         _record_drift()
         max_pos_drift_m = round(max_drift, 4)
-        return ToolResult(
-            data={
-                "name": "rotate_wrist",
-                "start_yaw": round(start_yaw, 4),
-                "target_yaw": round(float(target_yaw), 4),
-                "final_yaw": round(final_yaw, 4),
-                "final_err": round(final_err, 4),
-                "converged": abs(final_err) < tol,
-                "max_pos_drift_m": max_pos_drift_m,
-                "position_hold_ok": max_pos_drift_m <= pos_tol,
-                "steps_used": len(traj),
-                "terminated": self.env.terminated,
-                "truncated": self.env.truncated,
-            }
+        return self._motion_result(
+            reached=abs(final_err) < tol,
+            steps_used=steps_used,
+            yaw_error=final_err,
+            start_yaw=round(start_yaw, 4),
+            target_yaw=round(float(target_yaw), 4),
+            final_yaw=round(final_yaw, 4),
+            max_pos_drift_m=max_pos_drift_m,
+            position_hold_ok=max_pos_drift_m <= pos_tol,
         )
 
     @tool
@@ -529,18 +545,18 @@ class LiberoPrimitives:
         *,
         target_pitch: float | None = None,
         delta_pitch: float | None = None,
-        gripper: float = 1.0,
+        gripper: GripperMode = "hold",
         max_steps: int = 40,
         tol: float = 0.02,
         step_clip: float = 0.1,
         pos_tol: float = 0.03,
     ) -> ToolResult:
-        """Tilt the gripper around the world X-axis. Provide either target_pitch (absolute) or delta_pitch (relative). Holds xyz and yaw fixed by servoing back to the entry pose; the result carries converged, position_hold_ok, and max_pos_drift_m. Use before threading the gripper into a narrow opening whose front face normal is along world ±y (e.g. microwave cavity).
+        """Tilt the gripper around the world X-axis. Provide either target_pitch (absolute) or delta_pitch (relative). Holds xyz and yaw fixed by servoing back to the entry pose; the result carries position_hold_ok and max_pos_drift_m. Use before threading the gripper into a narrow opening whose front face normal is along world ±y (e.g. microwave cavity).
 
         Args:
             target_pitch: Absolute world-frame pitch target, rad
             delta_pitch: Relative pitch delta, rad
-            gripper: Gripper command held during rotation (default +1)
+            gripper: 'hold' keeps the current gripper command (default), 'open' opens, 'close' closes
             max_steps: Step budget (default 40)
             tol: Pitch tolerance, rad (default 0.02)
             step_clip: Per-step pitch clip, rad (default 0.10)
@@ -576,6 +592,7 @@ class LiberoPrimitives:
             target_pitch = start_pitch + float(delta_pitch)
         start_yaw = _yaw_of(start_quat)
         hold_xyz = np.array(self._last_obs_eef_pos, dtype=np.float32, copy=True)
+        grip = self._gripper_action(gripper)
         max_drift = 0.0
 
         def _record_drift() -> None:
@@ -584,61 +601,50 @@ class LiberoPrimitives:
             if drift > max_drift:
                 max_drift = drift
 
-        traj = []
-        for step in range(max_steps):
+        steps_used = 0
+        for _ in range(max_steps):
             _record_drift()
             raw = self.env.raw_obs()
             cur_quat = raw["robot0_eef_quat"]
-            cur_pitch = _pitch_of(cur_quat)
-            err = float(target_pitch - cur_pitch)
-            err = (err + np.pi) % (2 * np.pi) - np.pi
-            traj.append(
-                {"step": step, "pitch": round(cur_pitch, 4), "err": round(err, 4)}
-            )
+            err = wrap_angle(target_pitch - _pitch_of(cur_quat))
             if abs(err) < tol:
                 break
             cur_xyz = self._last_obs_eef_pos
-            cur_yaw = _yaw_of(cur_quat)
-            yaw_err = float((start_yaw - cur_yaw + np.pi) % (2 * np.pi) - np.pi)
+            yaw_err = wrap_angle(start_yaw - _yaw_of(cur_quat))
             step_dpitch = float(np.clip(err, -step_clip, step_clip))
             step_dyaw = float(np.clip(yaw_err, -step_clip, step_clip))
             action = np.zeros(7, dtype=np.float32)
             action[:3] = np.clip((hold_xyz - cur_xyz) / action_scale, -1.0, 1.0)
             action[3] = float(np.clip(step_dpitch / rot_scale, -1.0, 1.0))
             action[5] = float(np.clip(step_dyaw / rot_scale, -1.0, 1.0))
-            action[6] = float(gripper)
+            action[6] = grip
             self._step_env(action)
+            steps_used += 1
             if self.env.terminated or self.env.truncated:
                 break
-        final_quat = self.env.raw_obs()["robot0_eef_quat"]
-        final_pitch = _pitch_of(final_quat)
-        final_err = float((target_pitch - final_pitch + np.pi) % (2 * np.pi) - np.pi)
+        final_pitch = _pitch_of(self.env.raw_obs()["robot0_eef_quat"])
+        final_err = wrap_angle(target_pitch - final_pitch)
         _record_drift()
         max_pos_drift_m = round(max_drift, 4)
-        return ToolResult(
-            data={
-                "name": "rotate_pitch",
-                "start_pitch": round(start_pitch, 4),
-                "target_pitch": round(float(target_pitch), 4),
-                "final_pitch": round(final_pitch, 4),
-                "final_err": round(final_err, 4),
-                "converged": abs(final_err) < tol,
-                "max_pos_drift_m": max_pos_drift_m,
-                "position_hold_ok": max_pos_drift_m <= pos_tol,
-                "steps_used": len(traj),
-                "terminated": self.env.terminated,
-                "truncated": self.env.truncated,
-            }
+        return self._motion_result(
+            reached=abs(final_err) < tol,
+            steps_used=steps_used,
+            start_pitch=round(start_pitch, 4),
+            target_pitch=round(float(target_pitch), 4),
+            final_pitch=round(final_pitch, 4),
+            pitch_error=round(final_err, 4),
+            max_pos_drift_m=max_pos_drift_m,
+            position_hold_ok=max_pos_drift_m <= pos_tol,
         )
 
     @tool
     def move_pose(
         self,
-        xyz: Annotated[list[float], Field(min_length=3, max_length=3)],
+        xyz: WorldXYZ,
         *,
         target_pitch: float | None = None,
         target_yaw: float | None = None,
-        gripper: float = -1.0,
+        gripper: GripperMode = "hold",
         step_clip: float = 0.02,
         pitch_step: float = 0.08,
         yaw_step: float = 0.08,
@@ -653,7 +659,7 @@ class LiberoPrimitives:
             xyz: World-frame target [x, y, z] in meters
             target_pitch: Absolute pitch target, rad
             target_yaw: Absolute yaw target, rad
-            gripper: Gripper command held during the move (default -1)
+            gripper: 'hold' keeps the current gripper command (default), 'open' opens, 'close' closes
             step_clip: Per-step Δxyz cap, m (default 0.02)
             pitch_step: Per-step pitch clip, rad (default 0.08)
             yaw_step: Per-step yaw clip, rad (default 0.08)
@@ -672,32 +678,20 @@ class LiberoPrimitives:
             R = _R.from_quat([q[0], q[1], q[2], q[3]]).as_matrix()
             return float(np.arctan2(R[1, 0], R[0, 0]))
 
-        target = np.asarray(_normalize_xyz(xyz), dtype=np.float32)
-        traj = []
-        step = 0
-        for step in range(max_steps):
-            cur = self._last_obs_eef_pos
-            q = self.env.raw_obs()["robot0_eef_quat"]
-            diff = target - cur
-            dist = float(np.linalg.norm(diff))
+        def _errors(q) -> tuple[float, float]:
             p_err = (
-                0.0
-                if target_pitch is None
-                else float((target_pitch - _pitch_of(q) + np.pi) % (2 * np.pi) - np.pi)
+                0.0 if target_pitch is None else wrap_angle(target_pitch - _pitch_of(q))
             )
-            y_err = (
-                0.0
-                if target_yaw is None
-                else float((target_yaw - _yaw_of(q) + np.pi) % (2 * np.pi) - np.pi)
-            )
-            traj.append(
-                {
-                    "step": step,
-                    "eef": [round(float(x), 4) for x in cur],
-                    "dist": round(dist, 4),
-                    "p_err": round(p_err, 3),
-                }
-            )
+            y_err = 0.0 if target_yaw is None else wrap_angle(target_yaw - _yaw_of(q))
+            return p_err, y_err
+
+        target = np.asarray(_normalize_xyz(xyz), dtype=np.float32)
+        grip = self._gripper_action(gripper)
+        steps_used = 0
+        for _ in range(max_steps):
+            diff = target - self._last_obs_eef_pos
+            dist = float(np.linalg.norm(diff))
+            p_err, y_err = _errors(self.env.raw_obs()["robot0_eef_quat"])
             if dist < tol and abs(p_err) < ori_tol and abs(y_err) < ori_tol:
                 break
             action = np.zeros(7, dtype=np.float32)
@@ -709,78 +703,67 @@ class LiberoPrimitives:
             action[5] = float(
                 np.clip(np.clip(y_err, -yaw_step, yaw_step) / 0.10, -1.0, 1.0)
             )
-            action[6] = float(gripper)
+            action[6] = grip
             self._step_env(action)
+            steps_used += 1
             if self.env.terminated or self.env.truncated:
                 break
-        final = self._last_obs_eef_pos
+        dist = float(np.linalg.norm(target - self._last_obs_eef_pos))
         fq = self.env.raw_obs()["robot0_eef_quat"]
-        return ToolResult(
-            data={
-                "name": "move_pose",
-                "final_eef_pos": [round(float(x), 4) for x in final],
-                "final_dist_m": round(float(np.linalg.norm(target - final)), 4),
-                "final_pitch": round(_pitch_of(fq), 4),
-                "steps_used": step + 1,
-                "terminated": self.env.terminated,
-                "truncated": self.env.truncated,
-            }
+        p_err, y_err = _errors(fq)
+        return self._motion_result(
+            reached=dist < tol and abs(p_err) < ori_tol and abs(y_err) < ori_tol,
+            steps_used=steps_used,
+            dist_m=dist,
+            yaw_error=y_err if target_yaw is not None else None,
+            final_pitch=round(_pitch_of(fq), 4),
         )
 
     @tool
-    def release(self, *, max_steps: int = 20) -> ToolResult:
-        """Open the gripper for up to max_steps env steps while holding EEF in place. Triggers libero termination if the matching On/In predicate is met.
+    def release(self, *, steps: int = 20) -> ToolResult:
+        """Open the gripper for up to `steps` env steps while holding EEF in place. Triggers libero termination if the matching On/In predicate is met.
 
         Args:
-            max_steps: Step budget (default 20)
+            steps: Number of env steps (default 20)
         """
-        assert max_steps > 0, f"max_steps must be > 0, got {max_steps}"
-        start_grip = self._last_obs_gripper
-        peak_grip = start_grip
-        for step in range(max_steps):
+        if steps <= 0:
+            raise ValueError(f"steps must be > 0, got {steps}")
+        start_opening = self._gripper_opening()
+        peak_opening = start_opening
+        steps_used = 0
+        for _ in range(steps):
             action = np.zeros(7, dtype=np.float32)
-            action[6] = -1.0  # open
+            action[6] = self._gripper_action("open")
             self._step_env(action)
-            peak_grip = max(peak_grip, self._last_obs_gripper)
+            steps_used += 1
+            peak_opening = max(peak_opening, self._gripper_opening())
             if self.env.terminated or self.env.truncated:
                 break
-        return ToolResult(
-            data={
-                "name": "release",
-                "steps_used": step + 1,
-                "start_gripper_opening": round(start_grip, 4),
-                "peak_gripper_opening": round(peak_grip, 4),
-                "final_gripper_opening": round(self._last_obs_gripper, 4),
-                "terminated": self.env.terminated,
-                "truncated": self.env.truncated,
-            }
+        return self._motion_result(
+            reached=steps_used == steps or bool(self.env.terminated),
+            steps_used=steps_used,
+            start_gripper_opening=round(min(start_opening, 1.0), 3),
+            peak_gripper_opening=round(min(peak_opening, 1.0), 3),
         )
 
     @tool
-    def set_gripper(self, *, gripper: float = -1.0, steps: int = 5) -> ToolResult:
-        """Hold the current EEF pose and drive the gripper command for `steps` env steps. Use to firm up a grip mid-carry.
+    def set_gripper(self, *, command: GripperTarget, steps: int = 5) -> ToolResult:
+        """Hold the current EEF pose and drive the gripper open or closed for `steps` env steps. Use to firm up a grip mid-carry.
 
         Args:
-            gripper: Gripper command: -1 open, +1 close (default -1)
+            command: 'open' or 'close'
             steps: Number of env steps (default 5)
         """
-        g = float(gripper)
-        n = int(steps)
-        for _ in range(n):
+        grip = self._gripper_action(command)
+        steps_used = 0
+        for _ in range(int(steps)):
             action = np.zeros(7, dtype=np.float32)
-            action[6] = g
+            action[6] = grip
             self._step_env(action)
+            steps_used += 1
             if self.env.terminated or self.env.truncated:
                 break
-        return ToolResult(
-            data={
-                "name": "set_gripper",
-                "gripper": g,
-                "steps": n,
-                "terminated": self.env.terminated,
-                "truncated": self.env.truncated,
-            }
-        )
+        return self._motion_result(reached=steps_used == steps, steps_used=steps_used)
 
     # ---- introspection helpers (for LLM-in-the-loop) ----
 
@@ -1298,50 +1281,27 @@ def _save_observation_artifacts(
 # ---------------------------------------------------------------------------
 
 
+_LIBERO_VIEWS = (
+    CameraView("agentview", "policy_input", ("agentview_policy.png",)),
+    CameraView(
+        "agentview", "calibration_frame", ("agentview_high.png", "agentview.png")
+    ),
+    CameraView("wrist", "calibration_frame", ("wrist_high.png", "wrist.png")),
+)
+
+
 @tool(readonly=True, exclude=("state",))
 def view_env_state(
     step: Annotated[int, Field(json_schema_extra={"default": -1})] = -1,
     *,
     state: EnvState,
 ) -> ToolResult:
-    """Read one recorded state and its observation artifacts. Step -1 selects the latest entry. Embeds policy, agentview, and wrist images when available. Use the calibration-frame images for pixel back-projection; JSON state alone is not enough. Use agentview for global tabletop layout and object locations; use wrist for close-range details near the gripper, occlusions, and container/cabinet interiors.
+    """Read one recorded state and its observation artifacts. Step -1 selects the latest entry. Embeds policy, agentview, and wrist images when available; `images` names each embedded image's camera and role. Use the calibration-frame images for pixel back-projection; JSON state alone is not enough. Use agentview for global tabletop layout and object locations; use wrist for close-range details near the gripper, occlusions, and container/cabinet interiors.
 
     Args:
         step: Step number; 0 = initial, -1 = latest.
     """
-    images: list[bytes] = []
-    try:
-        record = state.get(step)
-    except Exception as exc:
-        return ToolResult(data={"error": f"state step not available: {exc}"})
-
-    nn = record.step_idx
-    extras = record.extras
-    out: dict = {
-        "step": nn,
-        "terminated": record.terminated,
-        "truncated": record.truncated,
-        "state": record.state,
-        "artifacts": sorted(record.artifacts),
-    }
-    out["task_language"] = extras.get("task_language")
-    out["log"] = {
-        "command": record.command,
-        "result": record.result,
-        "elapsed_s": record.elapsed_s,
-    }
-    for names in (
-        ("agentview_policy.png",),
-        ("agentview_high.png", "agentview.png"),
-        ("wrist_high.png", "wrist.png"),
-    ):
-        name = next((name for name in names if name in record.artifacts), None)
-        if name:
-            try:
-                images.append(state.load_bytes(name, step=nn))
-            except FileNotFoundError:
-                pass
-    return ToolResult(data=out, images=images)
+    return observation_result(state, step, _LIBERO_VIEWS)
 
 
 def _select_segment_artifacts(

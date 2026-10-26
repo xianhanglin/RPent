@@ -177,7 +177,7 @@
       },
       {
         "name": "view_env_state",
-        "description": "Read one recorded state and its observation artifacts. Step -1 selects the latest entry. Embeds policy, agentview, and wrist images when available. Use the calibration-frame images for pixel back-projection; JSON state alone is not enough. Use agentview for global tabletop layout and object locations; use wrist for close-range details near the gripper, occlusions, and container/cabinet interiors.",
+        "description": "Read one recorded state and its observation artifacts. Step -1 selects the latest entry. Embeds policy, agentview, and wrist images when available; `images` names each embedded image's camera and role. Use the calibration-frame images for pixel back-projection; JSON state alone is not enough. Use agentview for global tabletop layout and object locations; use wrist for close-range details near the gripper, occlusions, and container/cabinet interiors.",
         "input_schema": {
           "type": "object",
           "properties": {
@@ -187,18 +187,29 @@
       },
       {
         "name": "move_to",
-        "description": "Scripted EEF servo to a world-frame XYZ target via the OSC controller. Holds orientation (use rotate_wrist / rotate_pitch / move_pose to reorient). gripper: -1 = open, +1 = close. NEVER command a single move_to with |Δxy| > 0.30 — OSC flips IK and the run corrupts; split long traversal into 2-3 mid waypoints at carry z.",
+        "description": "Scripted EEF servo to a world-frame XYZ target via the OSC controller. Holds orientation unless target_yaw is supplied; then both position and yaw must converge. Use rotate_pitch or move_pose for pitch changes. NEVER command a single move_to with |Δxy| > 0.30 — OSC flips IK and the run corrupts; split long traversal into 2-3 mid waypoints at carry z.",
         "input_schema": {
           "type": "object",
           "properties": {
-            "xyz": {"type": "array", "description": "World-frame target [x, y, z] in meters", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
-            "gripper": {"type": "number", "description": "Gripper command: -1 open, +1 close (default -1)"},
-            "tol": {"type": "number", "description": "Position tolerance, m (default 0.012)"},
-            "step_clip": {"type": "number", "description": "Per-step Δxyz cap before action_scale, m (default 0.025)"},
-            "max_steps": {"type": "integer", "description": "Step budget (default 80)"},
-            "action_scale": {"type": "number", "description": "OSC action scale (default 0.05)"},
+            "xyz": {
+              "type": "array",
+              "description": "World-frame target [x, y, z] in meters",
+              "items": {"type": "number"},
+              "minItems": 3,
+              "maxItems": 3
+            },
+            "gripper": {
+              "type": "string",
+              "description": "'hold' keeps the current gripper command (default), 'open' opens, 'close' closes",
+              "enum": ["hold", "open", "close"]
+            },
             "target_yaw": {"type": ["number", "null"], "description": "Optional world-frame yaw target in radians"},
-            "yaw_step_clip": {"type": "number", "description": "Per-step yaw clip, rad (default 0.10)"}
+            "max_steps": {"type": "integer", "description": "Step budget (default 80)"},
+            "step_clip": {"type": "number", "description": "Per-step Δxyz cap before action_scale, m (default 0.025)"},
+            "tol": {"type": "number", "description": "Position tolerance, m (default 0.012)"},
+            "action_scale": {"type": "number", "description": "OSC action scale (default 0.05)"},
+            "yaw_step_clip": {"type": "number", "description": "Per-step yaw clip, rad (default 0.10)"},
+            "yaw_tol": {"type": "number", "description": "Positive finite yaw tolerance, rad (default 0.02)"}
           },
           "required": ["xyz"]
         }
@@ -233,34 +244,39 @@
       },
       {
         "name": "release",
-        "description": "Open the gripper for up to max_steps env steps while holding EEF in place. Triggers libero termination if the matching On/In predicate is met.",
+        "description": "Open the gripper for up to `steps` env steps while holding EEF in place. Triggers libero termination if the matching On/In predicate is met.",
         "input_schema": {
           "type": "object",
           "properties": {
-            "max_steps": {"type": "integer", "description": "Step budget (default 20)"}
+            "steps": {"type": "integer", "description": "Number of env steps (default 20)"}
           }
         }
       },
       {
         "name": "set_gripper",
-        "description": "Hold the current EEF pose and drive the gripper command for `steps` env steps. Use to firm up a grip mid-carry.",
+        "description": "Hold the current EEF pose and drive the gripper open or closed for `steps` env steps. Use to firm up a grip mid-carry.",
         "input_schema": {
           "type": "object",
           "properties": {
-            "gripper": {"type": "number", "description": "Gripper command: -1 open, +1 close (default -1)"},
+            "command": {"type": "string", "description": "'open' or 'close'", "enum": ["open", "close"]},
             "steps": {"type": "integer", "description": "Number of env steps (default 5)"}
-          }
+          },
+          "required": ["command"]
         }
       },
       {
         "name": "rotate_wrist",
-        "description": "Rotate the wrist around the world Z-axis. Provide either target_yaw (absolute) or delta_yaw (relative). Holds xyz fixed by servoing back to the entry pose; the result carries converged, position_hold_ok, and max_pos_drift_m.",
+        "description": "Rotate the wrist around the world Z-axis. Provide either delta_yaw (relative) or target_yaw (absolute). Holds xyz fixed by servoing back to the entry pose; the result carries position_hold_ok and max_pos_drift_m.",
         "input_schema": {
           "type": "object",
           "properties": {
-            "target_yaw": {"type": ["number", "null"], "description": "Absolute world-frame yaw target, rad"},
             "delta_yaw": {"type": ["number", "null"], "description": "Relative yaw delta, rad"},
-            "gripper": {"type": "number", "description": "Gripper command held during rotation (default +1)"},
+            "target_yaw": {"type": ["number", "null"], "description": "Absolute world-frame yaw target, rad"},
+            "gripper": {
+              "type": "string",
+              "description": "'hold' keeps the current gripper command (default), 'open' opens, 'close' closes",
+              "enum": ["hold", "open", "close"]
+            },
             "max_steps": {"type": "integer", "description": "Step budget (default 40)"},
             "tol": {"type": "number", "description": "Yaw tolerance, rad (default 0.02)"},
             "step_clip": {"type": "number", "description": "Per-step yaw clip, rad (default 0.10)"},
@@ -270,13 +286,17 @@
       },
       {
         "name": "rotate_pitch",
-        "description": "Tilt the gripper around the world X-axis. Provide either target_pitch (absolute) or delta_pitch (relative). Holds xyz and yaw fixed by servoing back to the entry pose; the result carries converged, position_hold_ok, and max_pos_drift_m. Use before threading the gripper into a narrow opening whose front face normal is along world ±y (e.g. microwave cavity).",
+        "description": "Tilt the gripper around the world X-axis. Provide either target_pitch (absolute) or delta_pitch (relative). Holds xyz and yaw fixed by servoing back to the entry pose; the result carries position_hold_ok and max_pos_drift_m. Use before threading the gripper into a narrow opening whose front face normal is along world ±y (e.g. microwave cavity).",
         "input_schema": {
           "type": "object",
           "properties": {
             "target_pitch": {"type": ["number", "null"], "description": "Absolute world-frame pitch target, rad"},
             "delta_pitch": {"type": ["number", "null"], "description": "Relative pitch delta, rad"},
-            "gripper": {"type": "number", "description": "Gripper command held during rotation (default +1)"},
+            "gripper": {
+              "type": "string",
+              "description": "'hold' keeps the current gripper command (default), 'open' opens, 'close' closes",
+              "enum": ["hold", "open", "close"]
+            },
             "max_steps": {"type": "integer", "description": "Step budget (default 40)"},
             "tol": {"type": "number", "description": "Pitch tolerance, rad (default 0.02)"},
             "step_clip": {"type": "number", "description": "Per-step pitch clip, rad (default 0.10)"},
@@ -290,10 +310,20 @@
         "input_schema": {
           "type": "object",
           "properties": {
-            "xyz": {"type": "array", "description": "World-frame target [x, y, z] in meters", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
+            "xyz": {
+              "type": "array",
+              "description": "World-frame target [x, y, z] in meters",
+              "items": {"type": "number"},
+              "minItems": 3,
+              "maxItems": 3
+            },
             "target_pitch": {"type": ["number", "null"], "description": "Absolute pitch target, rad"},
             "target_yaw": {"type": ["number", "null"], "description": "Absolute yaw target, rad"},
-            "gripper": {"type": "number", "description": "Gripper command held during the move (default -1)"},
+            "gripper": {
+              "type": "string",
+              "description": "'hold' keeps the current gripper command (default), 'open' opens, 'close' closes",
+              "enum": ["hold", "open", "close"]
+            },
             "step_clip": {"type": "number", "description": "Per-step Δxyz cap, m (default 0.02)"},
             "pitch_step": {"type": "number", "description": "Per-step pitch clip, rad (default 0.08)"},
             "yaw_step": {"type": "number", "description": "Per-step yaw clip, rad (default 0.08)"},
@@ -352,12 +382,22 @@
     "robots/robocasa/tools.py": [
       {
         "name": "move_to",
-        "description": "Scripted EEF servo to a world-frame XYZ target via the OSC controller. Holds pitch/yaw orientation (use rotate_pitch to reorient). gripper='hold' (DEFAULT) maintains current finger width — carry-safe without crushing small objects. Pass +1 to close, -1 to open. NEVER command a single move_to with |dxyz| > 0.30 — OSC flips IK; split long traversal into 2-3 mid waypoints at carry z.",
+        "description": "Scripted EEF servo to a world-frame XYZ target via the OSC controller. Holds pitch/yaw orientation (use rotate_pitch to reorient). NEVER command a single move_to with |dxyz| > 0.30 — OSC flips IK; split long traversal into 2-3 mid waypoints at carry z.",
         "input_schema": {
           "type": "object",
           "properties": {
-            "xyz": {"type": "array", "description": "World-frame target [x, y, z] in meters", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
-            "gripper": {"type": ["number", "string"], "description": "Gripper: +1 close, -1 open, or 'hold' to maintain current finger width (default 'hold')"},
+            "xyz": {
+              "type": "array",
+              "description": "World-frame target [x, y, z] in meters",
+              "items": {"type": "number"},
+              "minItems": 3,
+              "maxItems": 3
+            },
+            "gripper": {
+              "type": "string",
+              "description": "'hold' keeps the current finger width (default; carry-safe without crushing small objects), 'open' opens, 'close' closes",
+              "enum": ["hold", "open", "close"]
+            },
             "step_clip": {"type": "number", "description": "Per-step dxyz cap, m (default 0.02)"},
             "max_steps": {"type": "integer", "description": "Step budget (default 200)"},
             "tol": {"type": "number", "description": "Position tolerance, m (default 0.012)"}
@@ -367,12 +407,22 @@
       },
       {
         "name": "move_delta",
-        "description": "Relative EEF displacement from the current position. Computes target = current_eef + dxyz and delegates to move_to. Use for small adjustments (micro-align for grasp, approach). gripper='hold' (DEFAULT) maintains current finger width.",
+        "description": "Relative EEF displacement from the current position. Computes target = current_eef + dxyz and delegates to move_to. Use for small adjustments (micro-align for grasp, approach).",
         "input_schema": {
           "type": "object",
           "properties": {
-            "dxyz": {"type": "array", "description": "Relative displacement [dx, dy, dz] in meters", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
-            "gripper": {"type": ["number", "string"], "description": "Gripper: +1 close, -1 open, or 'hold' (default 'hold')"},
+            "dxyz": {
+              "type": "array",
+              "description": "Relative displacement [dx, dy, dz] in meters",
+              "items": {"type": "number"},
+              "minItems": 3,
+              "maxItems": 3
+            },
+            "gripper": {
+              "type": "string",
+              "description": "'hold' keeps the current finger width (default), 'open' opens, 'close' closes",
+              "enum": ["hold", "open", "close"]
+            },
             "step_clip": {"type": "number", "description": "Per-step dxyz cap, m (default 0.02)"},
             "max_steps": {"type": "integer", "description": "Step budget (default 80)"}
           },
@@ -386,25 +436,30 @@
           "type": "object",
           "properties": {
             "target_pitch": {"type": "number", "description": "Absolute pitch target, radians (clamped +/-1.5; default 0.6)"},
-            "gripper": {"type": "number", "description": "Gripper command held during rotation (default +1)"},
+            "gripper": {
+              "type": "string",
+              "description": "'hold' keeps the current finger width (default), 'open' opens, 'close' closes",
+              "enum": ["hold", "open", "close"]
+            },
             "n": {"type": "integer", "description": "Number of env steps for the rotation (default 12)"}
           }
         }
       },
       {
         "name": "set_gripper",
-        "description": "Hold the current EEF pose and drive the gripper command for `steps` env steps. Use to firm up a grip mid-carry or to actively open/close the gripper.",
+        "description": "Hold the current EEF pose and drive the gripper open or closed for `steps` env steps. Use to firm up a grip mid-carry or to actively open/close the gripper.",
         "input_schema": {
           "type": "object",
           "properties": {
-            "gripper": {"type": "number", "description": "Gripper command: +1 close, -1 open (default +1)"},
+            "command": {"type": "string", "description": "'open' or 'close'", "enum": ["open", "close"]},
             "steps": {"type": "integer", "description": "Number of env steps to hold (default 10)"}
-          }
+          },
+          "required": ["command"]
         }
       },
       {
         "name": "release",
-        "description": "Open the gripper for `steps` env steps while holding EEF in place. Delegates to set_gripper(-1.0, steps=steps). Use to drop a grasped object.",
+        "description": "Open the gripper for `steps` env steps while holding EEF in place. Use to drop a grasped object.",
         "input_schema": {
           "type": "object",
           "properties": {
@@ -462,21 +517,31 @@
       },
       {
         "name": "navigate_to",
-        "description": "Drive the mobile base toward a WORLD (x, y) target. Online-calibrates the base forward-heading, then turns to face + drives forward closed-loop. Holds the arm in place. gripper='hold' (DEFAULT) maintains current finger width while driving (carry-safe). Use tol = expected approach distance + object radius.",
+        "description": "Drive the mobile base toward a WORLD (x, y) target. Online-calibrates the base forward-heading, then turns to face + drives forward closed-loop. Holds the arm in place. Use tol = expected approach distance + object radius.",
         "input_schema": {
           "type": "object",
           "properties": {
-            "xy": {"type": "array", "description": "World-frame target [x, y] in meters (z ignored if provided)", "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
+            "xy": {
+              "type": "array",
+              "description": "World-frame target [x, y] in meters (z ignored if provided)",
+              "items": {"type": "number"},
+              "minItems": 2,
+              "maxItems": 2
+            },
             "tol": {"type": "number", "description": "Distance threshold to stop, m (default 0.20)"},
             "max_steps": {"type": "integer", "description": "Step budget (default 300)"},
-            "gripper": {"type": ["number", "string"], "description": "Gripper while driving: +1 close, -1 open, or 'hold' (default 'hold')"}
+            "gripper": {
+              "type": "string",
+              "description": "'hold' keeps the current finger width while driving (default), 'open' opens, 'close' closes",
+              "enum": ["hold", "open", "close"]
+            }
           },
           "required": ["xy"]
         }
       },
       {
         "name": "move_base",
-        "description": "Raw base velocity commands in the robot's LOCAL frame. +forward = drive forward, +lateral = strafe right, +turn = rotate CCW (yaw). All values clamped [-1, 1]. Use move_base for fine base adjustments near a target; use navigate_to for long-range navigation. gripper='hold' (DEFAULT) maintains finger width while driving.",
+        "description": "Raw base velocity commands in the robot's LOCAL frame. +forward = drive forward, +lateral = strafe right, +turn = rotate CCW (yaw). All values clamped [-1, 1]. Use move_base for fine base adjustments near a target; use navigate_to for long-range navigation.",
         "input_schema": {
           "type": "object",
           "properties": {
@@ -484,7 +549,11 @@
             "lateral": {"type": "number", "description": "Lateral / strafe velocity, [-1, 1] (default 0)"},
             "turn": {"type": "number", "description": "Yaw rotation velocity, [-1, 1] (default 0)"},
             "steps": {"type": "integer", "description": "Number of env steps (default 10)"},
-            "gripper": {"type": ["number", "string"], "description": "Gripper while driving: +1 close, -1 open, or 'hold' (default 'hold')"}
+            "gripper": {
+              "type": "string",
+              "description": "'hold' keeps the current finger width while driving (default), 'open' opens, 'close' closes",
+              "enum": ["hold", "open", "close"]
+            }
           }
         }
       },
@@ -498,11 +567,11 @@
       },
       {
         "name": "view_env_state",
-        "description": "Read step NN from states.json + the matching state images in the output dir. If step is null, returns the latest entry. Each entry contains the env state, robocasa_terminated flag, task_progress, vla_desync status, and log. Embeds available PNGs as multimodal image content blocks. Use calibration-frame agentview images for pixel back-projection; use navview for base navigation and floor walkability; use wrist for close-range details near the gripper.",
+        "description": "Read one recorded state and its observation artifacts. Step -1 selects the latest entry. Each entry contains the env state, terminated flag, success, task_progress, vla_desync status, and log. Embeds available PNGs as multimodal image content blocks; `images` names each embedded image's camera and role. Use calibration-frame agentview images for pixel back-projection; use navview for base navigation and floor walkability; use wrist for close-range details near the gripper.",
         "input_schema": {
           "type": "object",
           "properties": {
-            "step": {"type": ["integer", "null"], "description": "Step number; 0 = initial. Null = latest."}
+            "step": {"type": "integer", "default": -1, "description": "Step number; 0 = initial, -1 = latest."}
           }
         }
       },
@@ -538,11 +607,15 @@
       },
       {
         "name": "finish",
-        "description": "Declare the task finished. Call when robocasa_terminated becomes True (success detected), or when genuinely stuck after honest exploration. Provide a 1-3 sentence summary of what worked and what failed.",
+        "description": "Declare the task finished. Call when view_env_state reports terminated=true (success detected), or when genuinely stuck after honest exploration. Provide a 1-3 sentence summary of what worked and what failed.",
         "input_schema": {
           "type": "object",
           "properties": {
-            "status": {"type": "string", "enum": ["success", "failure", "stuck"], "description": "Task outcome classification."},
+            "status": {
+              "type": "string",
+              "description": "Task outcome classification.",
+              "enum": ["success", "failure", "stuck"]
+            },
             "summary": {"type": "string", "description": "1-3 sentence summary of what worked / what failed."}
           },
           "required": ["status", "summary"]
@@ -552,7 +625,7 @@
     "robots/robotwin/tools.py": [
       {
         "name": "view_env_state",
-        "description": "Read one EnvState step and its synchronized RoboTwin observation artifacts. Step -1 selects the latest entry. Embeds the head, left wrist, and right wrist RGB images when available.",
+        "description": "Read one EnvState step and its synchronized RoboTwin observation artifacts. Step -1 selects the latest entry. Embeds the head, left wrist, and right wrist RGB images when available; `images` names each embedded image's camera.",
         "input_schema": {
           "type": "object",
           "properties": {
@@ -610,55 +683,103 @@
       },
       {
         "name": "move_to",
-        "description": "Plan and move one arm to a world-frame xyz and wxyz orientation. The native planner returns qpos waypoints executed with fresh state.",
+        "description": "Plan and move one arm to a world-frame xyz. Keeps the current orientation unless target_yaw or a full wxyz quat is given. The native planner returns qpos waypoints executed with fresh state.",
         "input_schema": {
           "type": "object",
           "properties": {
-            "arm": {"type": "string", "enum": ["left", "right"]},
-            "xyz": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
-            "quat": {"type": ["array", "null"], "items": {"type": "number"}, "minItems": 4, "maxItems": 4},
-            "gripper": {"type": ["number", "null"]},
-            "substeps": {"type": "integer", "minimum": 0, "default": 25}
+            "arm": {"type": "string", "description": "Arm to move", "enum": ["left", "right"]},
+            "xyz": {
+              "type": "array",
+              "description": "World-frame target [x, y, z] in meters",
+              "items": {"type": "number"},
+              "minItems": 3,
+              "maxItems": 3
+            },
+            "gripper": {
+              "type": "string",
+              "description": "'hold' keeps the current gripper target (default), 'open' opens, 'close' closes",
+              "enum": ["hold", "open", "close"]
+            },
+            "target_yaw": {
+              "type": ["number", "null"],
+              "description": "Optional world-frame yaw target in radians; keeps the current tilt"
+            },
+            "quat": {
+              "type": ["array", "null"],
+              "description": "Optional full world-frame orientation, wxyz; excludes target_yaw",
+              "items": {"type": "number"},
+              "minItems": 4,
+              "maxItems": 4
+            },
+            "substeps": {
+              "type": "integer",
+              "default": 25,
+              "description": "Maximum executed waypoints sampled from the planned path (default 25)",
+              "minimum": 0
+            },
+            "tol": {"type": "number", "description": "Position tolerance for ok, m (default 0.01)"}
           },
           "required": ["arm", "xyz"]
         }
       },
       {
         "name": "rotate_wrist",
-        "description": "Rotate one EEF about world Z by a relative angle in degrees.",
+        "description": "Rotate one EEF about world Z in place. Provide either delta_yaw (relative) or target_yaw (absolute).",
         "input_schema": {
           "type": "object",
           "properties": {
-            "arm": {"type": "string", "enum": ["left", "right"]},
-            "delta_yaw_deg": {"type": "number"},
-            "gripper": {"type": ["number", "null"]},
-            "substeps": {"type": "integer", "minimum": 0, "default": 25}
+            "arm": {"type": "string", "description": "Arm to rotate", "enum": ["left", "right"]},
+            "delta_yaw": {"type": ["number", "null"], "description": "Relative yaw delta, rad"},
+            "target_yaw": {"type": ["number", "null"], "description": "Absolute world-frame yaw target, rad"},
+            "gripper": {
+              "type": "string",
+              "description": "'hold' keeps the current gripper target (default), 'open' opens, 'close' closes",
+              "enum": ["hold", "open", "close"]
+            },
+            "substeps": {
+              "type": "integer",
+              "default": 25,
+              "description": "Maximum executed waypoints sampled from the planned path (default 25)",
+              "minimum": 0
+            }
           },
-          "required": ["arm", "delta_yaw_deg"]
+          "required": ["arm"]
         }
       },
       {
         "name": "set_gripper",
-        "description": "Linearly move one normalized gripper to val over 10 actions.",
+        "description": "Move one gripper open, closed, or to an opening fraction (0 closed, 1 open) over `steps` native actions.",
         "input_schema": {
           "type": "object",
           "properties": {
-            "arm": {"type": "string", "enum": ["left", "right"]},
-            "val": {"type": "number", "minimum": 0, "maximum": 1},
-            "steps": {"type": "integer", "minimum": 1, "default": 10}
+            "arm": {"type": "string", "description": "Gripper's arm", "enum": ["left", "right"]},
+            "command": {
+              "description": "'open', 'close', or an opening fraction from 0 (closed) to 1 (open)",
+              "anyOf": [{"type": "string", "enum": ["open", "close"]}, {"type": "number", "minimum": 0, "maximum": 1}]
+            },
+            "steps": {
+              "type": "integer",
+              "default": 10,
+              "description": "Number of native actions (default 10)",
+              "minimum": 1
+            }
           },
-          "required": ["arm", "val"]
+          "required": ["arm", "command"]
         }
       },
       {
         "name": "release",
-        "description": "Open one gripper to 1.0 over 10 native actions.",
+        "description": "Open one gripper fully over `steps` native actions.",
         "input_schema": {
           "type": "object",
           "properties": {
-            "arm": {"type": "string", "enum": ["left", "right"]},
-            "val": {"type": "number", "default": 1.0},
-            "steps": {"type": "integer", "minimum": 1, "default": 10}
+            "arm": {"type": "string", "description": "Gripper's arm", "enum": ["left", "right"]},
+            "steps": {
+              "type": "integer",
+              "default": 10,
+              "description": "Number of native actions (default 10)",
+              "minimum": 1
+            }
           },
           "required": ["arm"]
         }

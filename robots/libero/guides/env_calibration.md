@@ -10,7 +10,7 @@ definition files to infer coordinates. Start with
 `wrist_high.png` through `back_project` or `segment`.
 
 Measured 2026-05-20 on `libero_10_with_mug` t0 (LIVING_ROOM frame) and t8
-(KITCHEN frame). All probes use `move_to` with `gripper=-1` and tight
+(KITCHEN frame). All probes use `move_to` with `gripper="open"` and tight
 `step_clip≤0.015`.
 
 ## Key finding: PRO scene frames, picked per-task by table fixture
@@ -130,7 +130,7 @@ limit 1.15). My libero_10 t0 used z=0.95 for travel — safe and consistent.
 4. **`set_gripper` after a stalled `move_to` is unsafe.** The previous
    t0 attempt closed the gripper above the bottle (eef stalled high)
    then opened it; this returned ok but the env was effectively desynced.
-   Treat any `move_to` with `log.result.final_dist_m > 0.02` as a failure and
+   Treat any `move_to` with `log.result.dist_m > 0.02` as a failure and
    recover (back to safe altitude, re-plan) before proceeding.
 5. **Drop height matters for basket tasks.** Release at eef z=0.58 in
    LIVING_ROOM frame caused basket displacement Δ≈4–5 cm; z=0.53 keeps
@@ -159,7 +159,7 @@ tools instead.
 ```bash
 # For each z in 0.65 .. 0.42, call the MCP tool:
 move_to({"xyz": [-0.20, 0.10, 0.65],
-         "gripper": -1, "tol": 0.008, "step_clip": 0.010,
+         "gripper": "open", "tol": 0.008, "step_clip": 0.010,
          "max_steps": 80})
-# Inspect the returned log for final_eef_pos and final_dist_m.
+# Inspect the returned log for eef_xyz and dist_m.
 ```

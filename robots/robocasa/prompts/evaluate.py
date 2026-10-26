@@ -96,7 +96,7 @@ AVAILABLE PRIMITIVES:
 - move_to(xyz, gripper): Arm servo to world xyz. OMIT gripper for carry-safe hold.
 - move_delta(dxyz): Relative arm nudge from current position.
 - rotate_pitch(target_pitch): Tilt wrist forward/back. Holds xyz.
-- set_gripper(gripper, steps): +1 close, -1 open.
+- set_gripper(command, steps): command is "open" or "close".
 - release(steps): Open gripper to drop.
 - scripted_grasp(xyz): Coarse fallback grasp (open, hover, descend, close, lift).
 - rldx_skill(prompt): VLA full-body skill (arm + base).
@@ -132,13 +132,12 @@ VLA EXECUTION RULES (the single most important rule):
 
 GRIPPER_RULES = """
 GRIPPER RULES:
-- For CARRYING a grasped object: OMIT the gripper parameter (it defaults to 'hold',
-  which maintains the current finger width without crushing the object).
-- +1 = actively close the gripper.
-- -1 = actively open the gripper.
-- 'hold' = maintain current finger width (safe for carrying).
+- Motion tools take gripper "hold", "open", or "close" and default to "hold",
+  which keeps the current finger width without crushing a grasped object.
+  For CARRYING, omit the gripper parameter.
+- "close" actively closes the gripper; "open" actively opens it, so carrying
+  with "open" drops the object.
 - release(steps) is the safe way to drop an object.
-- Carrying with -1 silently drops the object.
 """
 
 MEMORY = """

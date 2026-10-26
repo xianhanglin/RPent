@@ -24,7 +24,7 @@ otherwise archive what happened, reset, and change a named lever.
 """
 
 GOAL = """
-Drive `robocasa_terminated` / `success` to true. After success, preserve the
+Drive `terminated` / `success` to true. After success, preserve the
 winning trajectory and distil grounded lessons into layered memory.
 
 During exploration write working notes only below

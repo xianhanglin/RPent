@@ -62,6 +62,61 @@ Use ``@tool(readonly=True)`` for readers such as ``view_env_state`` and
 ``@tool(exclude=("state",))`` and bind them with ``Tool.with_handler``.
 All three planners use the registered declarations.
 
+.. _shared-core-tools:
+
+Shared Core Tools
+-----------------
+
+When a robot publishes ``move_to``, ``rotate_wrist``, ``set_gripper``,
+``release``, or ``view_env_state``, declare it with the types and result
+builders in ``rpent.tools.core`` so that the same call means the same thing on
+every robot:
+
+- positions are world-frame meters, angles are radians, and quaternions are
+  ``[w, x, y, z]``;
+- yaw is the heading of the end-effector X axis in the world XY plane;
+- motion tools take ``gripper: GripperMode`` (``"hold"``, ``"open"``, or
+  ``"close"``) and default to ``"hold"``, which keeps a grasped object grasped;
+- ``set_gripper`` takes ``command: GripperTarget`` (``"open"`` or ``"close"``),
+  and ``release`` opens fully;
+- gripper openings are fractions from 0 (closed) to 1 (open);
+- ``arm: Arm`` appears only on robots with more than one arm.
+
+Build motion and gripper results with ``motion_result`` and pass robot-specific
+keys as extra keyword arguments. Build ``view_env_state`` with
+``observation_result`` and a ``CameraView`` per embedded image:
+
+.. code-block:: python
+
+   from rpent.tools.core import GripperMode, WorldXYZ, motion_result, stop_reason
+
+   class MyRobotPrimitives:
+       @tool
+       def move_to(self, xyz: WorldXYZ, gripper: GripperMode = "hold") -> ToolResult:
+           """Move the end effector to a world-frame position.
+
+           Args:
+               xyz: World-frame target [x, y, z] in meters
+               gripper: 'hold' keeps the current gripper command (default), 'open' opens, 'close' closes
+           """
+           reached, steps = self._servo(xyz, self._gripper_command(gripper))
+           return motion_result(
+               ok=reached,
+               stop_reason=stop_reason(
+                   reached=reached, terminated=self._env.terminated, truncated=False
+               ),
+               steps_used=steps,
+               eef_xyz=self._env.eef_pos,
+               gripper_opening=self._env.gripper_opening,
+               terminated=self._env.terminated,
+               truncated=False,
+           )
+
+Robots may add optional arguments for their own controllers, such as step
+clips and tolerances. :doc:`../resources/core_tool_migration` lists how the
+LIBERO, RoboTwin, and RoboCasa tools changed when they adopted these
+conventions.
+
 .. _add-primitive-model-based:
 
 Add a VLA (or Other Model-based Primitive)

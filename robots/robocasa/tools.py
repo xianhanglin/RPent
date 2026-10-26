@@ -33,6 +33,7 @@ from robots.robocasa.primitives import RoboCasaPrimitives
 from rpent.session import EnvState, StepRecord
 from rpent.tools import ToolResult
 from rpent.tools.base import tool
+from rpent.tools.core import CameraView, observation_result
 
 # ---- state persistence (dump_state writes through the run's EnvState) ----
 
@@ -156,64 +157,27 @@ def _save_observation_artifacts(
 # ---- tool handlers (perception tools read the recorded EnvState) ----
 
 
+_ROBOCASA_VIEWS = (
+    CameraView("agentview", "calibration_frame", _CAMERA_IMAGE_ARTIFACTS["agentview"]),
+    CameraView("navview", "nav_view", _CAMERA_IMAGE_ARTIFACTS["navview"]),
+    CameraView("wrist", "calibration_frame", _CAMERA_IMAGE_ARTIFACTS["wrist"]),
+)
+
+
 @tool(readonly=True, exclude=("state",))
-def view_env_state(step: int | None = None, *, state: EnvState) -> ToolResult:
-    """Read step NN from states.json + the matching state images in the output dir. If step is null, returns the latest entry. Each entry contains the env state, robocasa_terminated flag, task_progress, vla_desync status, and log. Embeds available PNGs as multimodal image content blocks. Use calibration-frame agentview images for pixel back-projection; use navview for base navigation and floor walkability; use wrist for close-range details near the gripper.
+def view_env_state(
+    step: Annotated[int, Field(json_schema_extra={"default": -1})] = -1,
+    *,
+    state: EnvState,
+) -> ToolResult:
+    """Read one recorded state and its observation artifacts. Step -1 selects the latest entry. Each entry contains the env state, terminated flag, success, task_progress, vla_desync status, and log. Embeds available PNGs as multimodal image content blocks; `images` names each embedded image's camera and role. Use calibration-frame agentview images for pixel back-projection; use navview for base navigation and floor walkability; use wrist for close-range details near the gripper.
 
     Args:
-        step: Step number; 0 = initial. Null = latest.
+        step: Step number; 0 = initial, -1 = latest.
     """
-    images: list[bytes] = []
-    try:
-        record = state.get(step if step is not None else -1)
-    except Exception as exc:
-        return ToolResult(data={"error": f"state step not available: {exc}"})
-
-    nn = record.step_idx
-    extras = record.extras
-    out: dict = {
-        "step": nn,
-        "task_progress": extras.get("task_progress", {}),
-        "task_language": extras.get("task_language", ""),
-        "state": record.state,
-        "robocasa_terminated": record.terminated,
-        "vla_desync": extras.get("vla_desync", False),
-        "success": extras.get("success", False),
-        "log": {
-            "command": record.command,
-            "result": record.result,
-            "elapsed_s": record.elapsed_s,
-        },
-        "images": [],
-    }
-
-    for kind, candidates in (
-        ("camera", _CAMERA_IMAGE_ARTIFACTS["agentview"]),
-        ("navigation", _CAMERA_IMAGE_ARTIFACTS["navview"]),
-        ("wrist", _CAMERA_IMAGE_ARTIFACTS["wrist"]),
-    ):
-        for name in candidates:
-            if name not in record.artifacts:
-                continue
-            try:
-                images.append(state.load_bytes(name, step=nn))
-            except FileNotFoundError:
-                continue
-            label = {
-                "camera": ("calibration_frame", "agentview"),
-                "navigation": ("nav_view", "navview"),
-                "wrist": ("calibration_frame", "wrist"),
-            }[kind]
-            out["images"].append(
-                {
-                    "role": label[0],
-                    "camera": label[1],
-                    "artifact": name,
-                }
-            )
-            break
-
-    return ToolResult(data=out, images=images)
+    return observation_result(
+        state, step, _ROBOCASA_VIEWS, extra_keys=("task_progress", "vla_desync")
+    )
 
 
 @tool(readonly=True, exclude=("state",))
@@ -488,7 +452,7 @@ def query_world_map(
 
 @tool(readonly=True)
 def finish(status: Literal["success", "failure", "stuck"], summary: str) -> ToolResult:
-    """Declare the task finished. Call when robocasa_terminated becomes True (success detected), or when genuinely stuck after honest exploration. Provide a 1-3 sentence summary of what worked and what failed.
+    """Declare the task finished. Call when view_env_state reports terminated=true (success detected), or when genuinely stuck after honest exploration. Provide a 1-3 sentence summary of what worked and what failed.
 
     Args:
         status: Task outcome classification.

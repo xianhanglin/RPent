@@ -156,11 +156,11 @@ def _move_to_yaw_check(output_dir: Path, args: Namespace) -> dict[str, Any]:
         initial_yaw = yaw(env.raw_obs()["robot0_eef_quat"])
         target_yaw = (initial_yaw + 0.6 + np.pi) % (2 * np.pi) - np.pi
         result = primitives.move_to(
-            target_xyz.tolist(), target_yaw=target_yaw, gripper=1
+            target_xyz.tolist(), target_yaw=target_yaw, gripper="close"
         ).data
         final_yaw = yaw(env.raw_obs()["robot0_eef_quat"])
         error = (target_yaw - final_yaw + np.pi) % (2 * np.pi) - np.pi
-        if abs(error) >= 0.02 or result["final_dist_m"] >= 0.012:
+        if abs(error) >= 0.02 or result["dist_m"] >= 0.012:
             raise RuntimeError(
                 f"move_to did not reach its position/yaw target: {result}"
             )
@@ -170,7 +170,7 @@ def _move_to_yaw_check(output_dir: Path, args: Namespace) -> dict[str, Any]:
         "target_yaw": target_yaw,
         "final_yaw": final_yaw,
         "yaw_error_rad": error,
-        "position_error_m": result["final_dist_m"],
+        "position_error_m": result["dist_m"],
     }
 
 

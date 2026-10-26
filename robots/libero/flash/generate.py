@@ -29,6 +29,7 @@ from robots.libero.flash.relations import (
     extract_goal_relations,
     extract_long_relations,
 )
+from rpent.tools.core import TOOL_SPEC_VERSION, migrate_legacy_command
 
 CELL_TAG = re.compile(r"^(10|goal|object|spatial)_(task|swap)_t([0-9])_s(\d+)$")
 MOVE_ACTIONS = {"move_to", "move_pose"}
@@ -222,7 +223,7 @@ def _fallback_anchors(
                 for index, entry in enumerate(plan)
                 if previous_release < index < release
                 and entry.get("action") == "set_gripper"
-                and entry.get("gripper") == 1
+                and entry.get("command") == "close"
             ),
             None,
         )
@@ -352,8 +353,13 @@ def generate_flash_plan(
     destination: str | Path,
     *,
     segments: str | Path | None = None,
+    legacy_tool_args: bool = False,
 ) -> dict[str, Any]:
-    """Generate exactly one Flash plan; never inspect another seed."""
+    """Generate exactly one Flash plan; never inspect another seed.
+
+    Set ``legacy_tool_args`` for recipes recorded before the shared core tool
+    conventions; their calls are translated before the plan is built.
+    """
     audit_path = Path(audit_path)
     recipe_path = Path(recipe_path)
     destination = Path(destination)
@@ -378,6 +384,8 @@ def generate_flash_plan(
     language = _task_language(audit)
     graph = extract_relations(identity.family, language)
     raw_plan = _read_recipe(recipe_path)
+    if legacy_tool_args:
+        raw_plan = [migrate_legacy_command("libero", entry) for entry in raw_plan]
 
     segment_dir = (
         Path(segments) if segments is not None else audit_path.parent / "segments"
@@ -397,6 +405,7 @@ def generate_flash_plan(
         "language": language,
         "source": provenance,
         "goal_graph": graph.as_dict(),
+        "tool_spec": TOOL_SPEC_VERSION,
         "plan": plan,
     }
     anchors_doc = {
@@ -449,9 +458,18 @@ def main() -> int:
         type=Path,
         help="optional directory of segment_*.json readings from this trace",
     )
+    parser.add_argument(
+        "--legacy-tool-args",
+        action="store_true",
+        help="translate a recipe recorded before the shared core tool conventions",
+    )
     args = parser.parse_args()
     row = generate_flash_plan(
-        args.audit, args.recipe, args.destination, segments=args.segments
+        args.audit,
+        args.recipe,
+        args.destination,
+        segments=args.segments,
+        legacy_tool_args=args.legacy_tool_args,
     )
     print(json.dumps(row, ensure_ascii=False, indent=2))
     return 0

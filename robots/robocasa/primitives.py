@@ -22,9 +22,17 @@ from pydantic import Field
 
 from robots.robocasa.rldx_skill import RLDXSkill
 from rpent.tools import ToolResult, tool
+from rpent.tools.core import (
+    GripperMode,
+    GripperTarget,
+    WorldXYZ,
+    motion_result,
+    stop_reason,
+)
 
 OSC_POS_SCALE = 0.05  # action 1.0 -> 0.05 m target delta
 OSC_ROT_SCALE = 0.5  # action 1.0 -> 0.5 rad
+FINGER_OPEN_QPOS = 0.04  # robot0_gripper_qpos[0] with the fingers fully open
 
 
 class RoboCasaPrimitives:
@@ -126,21 +134,37 @@ class RoboCasaPrimitives:
         # +1 close/hold, -1 open
         return float(np.clip(g, -1, 1))
 
-    def _resolve_grip(self, gripper, target_q):
+    def _resolve_grip(self, gripper: GripperMode, target_q: float) -> float:
         """Return the a[6] gripper command for a motion step.
-        gripper="hold"/None (DEFAULT for moves) -> SERVO the fingers back to `target_q`,
-        the width they had when the motion began. This is the carry-safe hold: the
-        gripper action is a CLOSE-VELOCITY command, so a sustained +1 keeps driving the
-        fingers shut and SQUEEZES a small object OUT (verified: bread qpos 0.0376 -> 0.0005
-        during a +1 carry). Servoing to the grasped width holds the object without crushing
-        it and without letting it drift open. A numeric gripper (+1 close / -1 open) is an
-        EXPLICIT override and passes through unchanged."""
-        if isinstance(gripper, str) or gripper is None:
+
+        "hold" SERVOS the fingers back to `target_q`, the width they had when the
+        motion began. This is the carry-safe hold: the gripper action is a
+        CLOSE-VELOCITY command, so a sustained +1 keeps driving the fingers shut and
+        SQUEEZES a small object OUT (verified: bread qpos 0.0376 -> 0.0005 during a +1
+        carry). Servoing to the grasped width holds the object without crushing it and
+        without letting it drift open. "open" and "close" drive -1 and +1.
+        """
+        if gripper == "hold":
             cur = float(self.env.gripper_qpos[0])
             return float(
                 np.clip(60.0 * (cur - target_q), -1.0, 1.0)
             )  # +a[6] closes (qpos↓)
-        return self._hold_gripper_val(gripper)
+        return {"open": -1.0, "close": 1.0}[gripper]
+
+    def _motion_result(self, *, reached: bool, steps_used: int, **extra) -> ToolResult:
+        terminated = bool(self.env.terminated)
+        return motion_result(
+            ok=reached,
+            stop_reason=stop_reason(
+                reached=reached, terminated=terminated, truncated=False
+            ),
+            steps_used=steps_used,
+            eef_xyz=self.env.eef_pos,
+            gripper_opening=float(self.env.gripper_qpos[0]) / FINGER_OPEN_QPOS,
+            terminated=terminated,
+            truncated=False,
+            **extra,
+        )
 
     def _step_arm(self, dpos=(0, 0, 0), drot=(0, 0, 0), gripper=-1.0, n=1):
         a = self._zero(base_mode=-1.0)
@@ -180,17 +204,17 @@ class RoboCasaPrimitives:
     @tool
     def move_to(
         self,
-        xyz: Annotated[list[float], Field(min_length=3, max_length=3)],
-        gripper: float | str = "hold",
+        xyz: WorldXYZ,
+        gripper: GripperMode = "hold",
         step_clip: float = 0.02,
         max_steps: int = 200,
         tol: float = 0.012,
     ) -> ToolResult:
-        """Scripted EEF servo to a world-frame XYZ target via the OSC controller. Holds pitch/yaw orientation (use rotate_pitch to reorient). gripper='hold' (DEFAULT) maintains current finger width — carry-safe without crushing small objects. Pass +1 to close, -1 to open. NEVER command a single move_to with |dxyz| > 0.30 — OSC flips IK; split long traversal into 2-3 mid waypoints at carry z.
+        """Scripted EEF servo to a world-frame XYZ target via the OSC controller. Holds pitch/yaw orientation (use rotate_pitch to reorient). NEVER command a single move_to with |dxyz| > 0.30 — OSC flips IK; split long traversal into 2-3 mid waypoints at carry z.
 
         Args:
             xyz: World-frame target [x, y, z] in meters
-            gripper: Gripper: +1 close, -1 open, or 'hold' to maintain current finger width (default 'hold')
+            gripper: 'hold' keeps the current finger width (default; carry-safe without crushing small objects), 'open' opens, 'close' closes
             step_clip: Per-step dxyz cap, m (default 0.02)
             max_steps: Step budget (default 200)
             tol: Position tolerance, m (default 0.012)
@@ -201,54 +225,40 @@ class RoboCasaPrimitives:
         if self._pos_jac is None:
             self._calibrate_pos_jacobian(gripper=self._resolve_grip(gripper, target_q))
         Jinv = np.linalg.pinv(self._pos_jac)
-        for i in range(max_steps):
-            cur = self.env.eef_pos
-            err = target - cur
+        steps_used = 0
+        for _ in range(max_steps):
+            err = target - self.env.eef_pos
             dist = float(np.linalg.norm(err))
             if dist < tol:
-                return ToolResult(
-                    data={
-                        "ok": True,
-                        "steps": i,
-                        "final_dist": dist,
-                        "eef": cur.tolist(),
-                        "gripper_qpos": round(float(self.env.gripper_qpos[0]), 4),
-                    }
-                )
+                break
             step_world = err if dist <= step_clip else err / dist * step_clip
-            a_xyz = np.clip(Jinv @ step_world, -1, 1)
             a = self._zero()
-            a[0:3] = a_xyz
+            a[0:3] = np.clip(Jinv @ step_world, -1, 1)
             a[6] = self._resolve_grip(gripper, target_q)
             if self._check_cancelled is not None:
                 self._check_cancelled()
             self.env.step(a)
+            steps_used += 1
             if self._recording:
                 self.record_frame()
-        cur = self.env.eef_pos
-        return ToolResult(
-            data={
-                "ok": False,
-                "steps": max_steps,
-                "final_dist": float(np.linalg.norm(target - cur)),
-                "eef": cur.tolist(),
-                "gripper_qpos": round(float(self.env.gripper_qpos[0]), 4),
-            }
+        dist = float(np.linalg.norm(target - self.env.eef_pos))
+        return self._motion_result(
+            reached=dist < tol, steps_used=steps_used, dist_m=dist
         )
 
     @tool
     def move_delta(
         self,
         dxyz: Annotated[list[float], Field(min_length=3, max_length=3)],
-        gripper: float | str = "hold",
+        gripper: GripperMode = "hold",
         step_clip: float = 0.02,
         max_steps: int = 80,
     ) -> ToolResult:
-        """Relative EEF displacement from the current position. Computes target = current_eef + dxyz and delegates to move_to. Use for small adjustments (micro-align for grasp, approach). gripper='hold' (DEFAULT) maintains current finger width.
+        """Relative EEF displacement from the current position. Computes target = current_eef + dxyz and delegates to move_to. Use for small adjustments (micro-align for grasp, approach).
 
         Args:
             dxyz: Relative displacement [dx, dy, dz] in meters
-            gripper: Gripper: +1 close, -1 open, or 'hold' (default 'hold')
+            gripper: 'hold' keeps the current finger width (default), 'open' opens, 'close' closes
             step_clip: Per-step dxyz cap, m (default 0.02)
             max_steps: Step budget (default 80)
         """
@@ -259,51 +269,51 @@ class RoboCasaPrimitives:
 
     @tool
     def rotate_pitch(
-        self, target_pitch: float = 0.6, gripper: float = 1, n: int = 12
+        self, target_pitch: float = 0.6, gripper: GripperMode = "hold", n: int = 12
     ) -> ToolResult:
         """Tilt the wrist forward (axis-angle about the control X-axis). This pitches the gripper down/up. Holds xyz fixed. Use before threading the gripper into a narrow opening whose front face normal is along world +/-y.
 
         Args:
             target_pitch: Absolute pitch target, radians (clamped +/-1.5; default 0.6)
-            gripper: Gripper command held during rotation (default +1)
+            gripper: 'hold' keeps the current finger width (default), 'open' opens, 'close' closes
             n: Number of env steps for the rotation (default 12)
         """
         self._vla_desync = True
         per = float(np.clip(target_pitch, -1.5, 1.5)) / n
+        target_q = float(self.env.gripper_qpos[0])
         for _ in range(n):
-            self._step_arm(drot=(per, 0, 0), gripper=gripper, n=1)
-        return ToolResult(data={"ok": True, "eef": self.env.eef_pos.tolist()})
+            self._step_arm(
+                drot=(per, 0, 0), gripper=self._resolve_grip(gripper, target_q), n=1
+            )
+        return self._motion_result(reached=True, steps_used=n)
 
     @tool
-    def set_gripper(self, gripper: float = 1, steps: int = 10) -> ToolResult:
-        """Hold the current EEF pose and drive the gripper command for `steps` env steps. Use to firm up a grip mid-carry or to actively open/close the gripper.
+    def set_gripper(self, command: GripperTarget, steps: int = 10) -> ToolResult:
+        """Hold the current EEF pose and drive the gripper open or closed for `steps` env steps. Use to firm up a grip mid-carry or to actively open/close the gripper.
 
         Args:
-            gripper: Gripper command: +1 close, -1 open (default +1)
+            command: 'open' or 'close'
             steps: Number of env steps to hold (default 10)
         """
         self._vla_desync = True
-        g = self._hold_gripper_val(gripper)
         a = self._zero()
-        a[6] = g
+        a[6] = self._resolve_grip(command, target_q=0.0)
         for _ in range(steps):
             if self._check_cancelled is not None:
                 self._check_cancelled()
             self.env.step(a)
             if self._recording:
                 self.record_frame()
-        return ToolResult(
-            data={"ok": True, "gripper_qpos": self.env.gripper_qpos.tolist()}
-        )
+        return self._motion_result(reached=True, steps_used=steps)
 
     @tool
     def release(self, steps: int = 10) -> ToolResult:
-        """Open the gripper for `steps` env steps while holding EEF in place. Delegates to set_gripper(-1.0, steps=steps). Use to drop a grasped object.
+        """Open the gripper for `steps` env steps while holding EEF in place. Use to drop a grasped object.
 
         Args:
             steps: Number of env steps (default 10)
         """
-        return self.set_gripper(-1.0, steps=steps)
+        return self.set_gripper("open", steps=steps)
 
     # ---- Phase 4: scripted grasp ----
     @tool
@@ -323,16 +333,16 @@ class RoboCasaPrimitives:
             step_clip: Per-step dxyz cap during descent, m (default 0.02)
         """
         t = np.asarray(xyz, dtype=np.float64)
-        self.set_gripper(-1.0, steps=4)
-        r = self.move_to(t + [0, 0, approach_z], gripper=-1.0, step_clip=step_clip)
+        self.set_gripper("open", steps=4)
+        r = self.move_to(t + [0, 0, approach_z], gripper="open", step_clip=step_clip)
         if not r.data["ok"]:
             return ToolResult(data={**r.data, "stage": "approach"})
         r = self.move_to(
-            t + [0, 0, grasp_z_offset], gripper=-1.0, step_clip=0.012, tol=0.01
+            t + [0, 0, grasp_z_offset], gripper="open", step_clip=0.012, tol=0.01
         )
         if not r.data["ok"]:
             return ToolResult(data={**r.data, "stage": "descent"})
-        self.set_gripper(+1.0, steps=14)
+        self.set_gripper("close", steps=14)
         r = self.move_to(t + [0, 0, approach_z + 0.05], gripper="hold", step_clip=0.015)
         if not r.data["ok"]:
             return ToolResult(data={**r.data, "stage": "lift"})
@@ -359,16 +369,16 @@ class RoboCasaPrimitives:
         lateral: float = 0,
         turn: float = 0,
         steps: int = 10,
-        gripper: float | str = "hold",
+        gripper: GripperMode = "hold",
     ) -> ToolResult:
-        """Raw base velocity commands in the robot's LOCAL frame. +forward = drive forward, +lateral = strafe right, +turn = rotate CCW (yaw). All values clamped [-1, 1]. Use move_base for fine base adjustments near a target; use navigate_to for long-range navigation. gripper='hold' (DEFAULT) maintains finger width while driving.
+        """Raw base velocity commands in the robot's LOCAL frame. +forward = drive forward, +lateral = strafe right, +turn = rotate CCW (yaw). All values clamped [-1, 1]. Use move_base for fine base adjustments near a target; use navigate_to for long-range navigation.
 
         Args:
             forward: Forward velocity, [-1, 1] (default 0)
             lateral: Lateral / strafe velocity, [-1, 1] (default 0)
             turn: Yaw rotation velocity, [-1, 1] (default 0)
             steps: Number of env steps (default 10)
-            gripper: Gripper while driving: +1 close, -1 open, or 'hold' (default 'hold')
+            gripper: 'hold' keeps the current finger width while driving (default), 'open' opens, 'close' closes
         """
         self._vla_desync = True
         target_q = float(self.env.gripper_qpos[0])
@@ -432,15 +442,15 @@ class RoboCasaPrimitives:
         xy: Annotated[list[float], Field(min_length=2, max_length=2)],
         tol: float = 0.2,
         max_steps: int = 300,
-        gripper: float | str = "hold",
+        gripper: GripperMode = "hold",
     ) -> ToolResult:
-        """Drive the mobile base toward a WORLD (x, y) target. Online-calibrates the base forward-heading, then turns to face + drives forward closed-loop. Holds the arm in place. gripper='hold' (DEFAULT) maintains current finger width while driving (carry-safe). Use tol = expected approach distance + object radius.
+        """Drive the mobile base toward a WORLD (x, y) target. Online-calibrates the base forward-heading, then turns to face + drives forward closed-loop. Holds the arm in place. Use tol = expected approach distance + object radius.
 
         Args:
             xy: World-frame target [x, y] in meters (z ignored if provided)
             tol: Distance threshold to stop, m (default 0.20)
             max_steps: Step budget (default 300)
-            gripper: Gripper while driving: +1 close, -1 open, or 'hold' (default 'hold')
+            gripper: 'hold' keeps the current finger width while driving (default), 'open' opens, 'close' closes
         """
         self._vla_desync = True
         target = np.asarray(xy[:2], dtype=np.float64)

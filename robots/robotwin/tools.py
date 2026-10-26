@@ -24,6 +24,7 @@ from pydantic import Field
 from rpent.session import EnvState, StepRecord
 from rpent.tools import ToolResult
 from rpent.tools.base import tool
+from rpent.tools.core import CameraView, observation_result
 
 
 def _tool_error(code: str, message: str, **details: Any) -> ToolResult:
@@ -388,40 +389,25 @@ def dump_observation(
     return env_state.get(step_idx)
 
 
+_ROBOTWIN_VIEWS = tuple(
+    CameraView(view, role, (_artifact_name(view, "rgb"),))
+    for view, role in (
+        ("head", "scene"),
+        ("left_wrist", "wrist"),
+        ("right_wrist", "wrist"),
+    )
+)
+
+
 @tool(readonly=True, exclude=("state",))
 def view_env_state(
     step: Annotated[int, Field(json_schema_extra={"default": -1})] = -1,
     *,
     state: EnvState,
 ) -> ToolResult:
-    """Read one EnvState step and its synchronized RoboTwin observation artifacts. Step -1 selects the latest entry. Embeds the head, left wrist, and right wrist RGB images when available.
+    """Read one EnvState step and its synchronized RoboTwin observation artifacts. Step -1 selects the latest entry. Embeds the head, left wrist, and right wrist RGB images when available; `images` names each embedded image's camera.
 
     Args:
         step: Step number; 0 = initial, -1 = latest.
     """
-    images: list[bytes] = []
-    try:
-        record = state.get(step)
-    except Exception as error:
-        return ToolResult(data={"error": f"state step not available: {error}"})
-    result: dict[str, Any] = {
-        "step": record.step_idx,
-        "terminated": record.terminated,
-        "truncated": record.truncated,
-        "state": record.state,
-        "artifacts": sorted(record.artifacts),
-        "task_language": record.extras.get("task_language"),
-    }
-    result["log"] = {
-        "command": record.command,
-        "result": record.result,
-        "elapsed_s": record.elapsed_s,
-    }
-    for view in ("head", "left_wrist", "right_wrist"):
-        name = _artifact_name(view, "rgb")
-        if name in record.artifacts:
-            try:
-                images.append(state.load_bytes(name, step=record.step_idx))
-            except FileNotFoundError:
-                pass
-    return ToolResult(data=result, images=images)
+    return observation_result(state, step, _ROBOTWIN_VIEWS)

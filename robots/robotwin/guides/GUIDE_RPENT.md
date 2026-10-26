@@ -28,9 +28,12 @@ several interior pixels and use robust geometry; an exposed surface point is not
 necessarily an object center. Re-observe after occlusion or physical change.
 
 The aloha-agilex state is qpos14: six joints plus one normalized gripper value
-per arm. Gripper 0 is closed and 1 is open. `move_to` targets EEF pose; EEF and
-TCP differ, so do not send a raw object surface point as an EEF contact target.
-Coordinates are world-frame metres and quaternions are `[qw,qx,qy,qz]`.
+per arm. Gripper 0 is closed and 1 is open. Motion tools take `gripper` as
+`"hold"` (default, keeps the current target), `"open"`, or `"close"`;
+`set_gripper` also accepts an opening fraction from 0 to 1. `move_to` targets
+EEF pose; EEF and TCP differ, so do not send a raw object surface point as an
+EEF contact target. Coordinates are world-frame metres, angles are radians, and
+quaternions are `[qw,qx,qy,qz]`.
 
 ## VLA and primitives
 

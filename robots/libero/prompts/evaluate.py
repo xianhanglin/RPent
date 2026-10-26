@@ -51,15 +51,14 @@ failure modes you need to adapt the recipe to this seed. A recipe read without
 its memory is half the picture; consult BOTH before planning.
 
 CRITICAL MECHANICS (cost many wasted attempts before they were nailed):
-- **GRIPPER SIGN**: in `move_to` / `set_gripper`, `gripper:+1` = CLOSE/hold,
-  `gripper:-1` = OPEN. To CARRY a grasped object, hold `gripper:+1` the whole way
-  (carrying with `-1` silently OPENS and drops it — the #1 early bug). `set_gripper +1`
-  (steps 8-12) firms the grip after a pick; for a laterally-weak CAN use steps<=5.
-- **`move_pose` defaults gripper to OPEN (-1) if you omit it** — always pass
-  `"gripper":1` in `move_pose` while holding an object.
+- **GRIPPER**: motion tools take `"gripper": "hold" | "open" | "close"` and
+  default to `"hold"`, which keeps the last gripper command, so a grasped object
+  stays grasped through a carry. Passing `"open"` mid-carry drops it.
+  `set_gripper {"command": "close"}` (steps 8-12) firms the grip after a pick;
+  for a laterally-weak CAN use steps<=5.
 - **`move_pose` threads the OSC IK singularity that `move_to` walls at** — for
   cabinet-front / microwave-cavity / deep reaches, when `move_to` stalls
-  (final_dist stays high, eef retreats), switch to `move_pose` (co-vary
+  (`dist_m` stays high, eef retreats), switch to `move_pose` (co-vary
   xyz+pitch+yaw). It reaches several cm deeper.
 
 GRASPING:
@@ -123,7 +122,7 @@ PER-TASK RECIPES THAT WORKED AT SEED 0 (adapt coords to your seed):
        (+y) or at the workspace IK edge (|y|>0.27 walls z>=0.56 — unreachable
        forever). Stop Pi0 at lift; if lift isn't reached within 8 chunks,
        RE-ISSUE pi0_pick rather than raising max_chunks.
-    2. The instant lift is detected: `set_gripper +1` (steps 8-12) to lock the
+    2. The instant lift is detected: `set_gripper "close"` (steps 8-12) to lock the
        grip, then YOU script the entire carry + place (Rule 1 — Pi0 never places).
     3. Measure the held-mug offset PER PICK by wrist-segmenting the HELD mug
        (offsets differ pick-to-pick: dy=-0.055 on one grasp, -0.013 on the next —
@@ -141,7 +140,7 @@ PER-TASK RECIPES THAT WORKED AT SEED 0 (adapt coords to your seed):
   gripper_closed_thresh:0`; then grasp the pan by its HANDLE, re-segment mid-carry
   to converge on the burner.
 - moka→stove (t8): grasp body, carry LOW (~4cm lift) in tiny hops (step_clip
-  0.006-0.01), re-clamp `set_gripper +1` between hops; "LEFT" = +y pot.
+  0.006-0.01), re-clamp `set_gripper "close"` between hops; "LEFT" = +y pot.
 - bottle→bottom drawer + close (t3): the drawer In-region is SHALLOW
   (y≈0.075-0.227) — place at the MOUTH (y≈0.13), NOT the deep recess; `pi0_pick`
   the bottle from home pose, `rotate_pitch` it flat ALONG X (the wide footprint),
@@ -441,7 +440,7 @@ identify all entities up front. Do the FINAL READY CHECK, then plan.
 """,
     """EXECUTE one primitive at a time by calling its structured tool:
 
-    move_to({"xyz": [x, y, z], "gripper": -1, ...})
+    move_to({"xyz": [x, y, z], "gripper": "open", ...})
     pi0_pick({"prompt": "...", "max_chunks": 20, ...})
     release({})
 

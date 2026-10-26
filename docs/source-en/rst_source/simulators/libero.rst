@@ -286,16 +286,17 @@ LIBERO tools fall into two groups: physical action tools and read-only tools.
 
 - ``pi0_pick(prompt, ...)`` — use Pi0.5 to execute a closed-loop grasp.
 - ``pi0_doubled(prompt, ...)`` — use Pi0.5 for a non-pick contact action.
-- ``move_to(xyz, ...)`` — move the end effector to a world-frame position.
+- ``move_to(xyz, gripper=..., ...)`` — move the end effector to a world-frame
+  position. ``gripper`` is ``"hold"`` (default), ``"open"``, or ``"close"``.
 - ``move_pose(xyz, target_pitch=..., target_yaw=..., ...)`` — move position
   and orientation together.
 - ``rotate_wrist(target_yaw=... / delta_yaw=..., ...)`` — rotate wrist yaw
   to an absolute target or by a relative amount.
 - ``rotate_pitch(target_pitch=... / delta_pitch=..., ...)`` — tilt the
   gripper to an absolute pitch or by a relative amount.
-- ``set_gripper(gripper=..., steps=...)`` — hold the pose and drive the
-  gripper for a fixed number of steps.
-- ``release(...)`` — open the gripper.
+- ``set_gripper(command=..., steps=...)`` — hold the pose and drive the
+  gripper open or closed for a fixed number of steps.
+- ``release(steps=...)`` — open the gripper.
 
 Physical action tools advance the environment and record new state and images.
 

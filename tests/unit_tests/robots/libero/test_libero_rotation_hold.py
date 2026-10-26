@@ -107,7 +107,7 @@ def test_rotation_holds_position_and_uses_half_radian_scale(method, delta_name, 
     issued = [float(action[axis]) for action in env.actions]
     # clip(0.10 / 0.5), clip(0.10 / 0.5), clip(0.05 / 0.5); / 0.10 would be 1, 1, 0.5.
     assert issued == pytest.approx([0.2, 0.2, 0.1])
-    assert result["converged"] is True
+    assert result["ok"] is True
     assert result["position_hold_ok"] is True
     assert result["max_pos_drift_m"] <= 0.03
 
@@ -179,7 +179,7 @@ def test_position_hold_failure_has_no_error_key(method, delta_name):
     env = _FakeEnv(_walk)
     result = _call(env, method, **{delta_name: 0.25})
 
-    assert result["converged"] is True
+    assert result["ok"] is True
     assert result["position_hold_ok"] is False
     assert result["max_pos_drift_m"] > 0.03
     assert "error" not in result
@@ -196,7 +196,7 @@ def test_rotation_step_budget_reports_not_converged(method, delta_name):
     env = _FakeEnv(_noop)
     result = _call(env, method, **{delta_name: 0.5}, max_steps=4)
 
-    assert result["converged"] is False
+    assert result["ok"] is False
     assert result["steps_used"] == 4
     assert len(env.actions) == 4
 

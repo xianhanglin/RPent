@@ -246,12 +246,12 @@ LIBERO 工具分为物理动作工具和只读工具。
 
 - ``pi0_pick(prompt, ...)`` —— 调用 Pi0.5 执行闭环抓取。
 - ``pi0_doubled(prompt, ...)`` —— 调用 Pi0.5 执行非抓取类接触动作。
-- ``move_to(xyz, ...)`` —— 将末端执行器移动到世界坐标系中的目标位置。
+- ``move_to(xyz, gripper=..., ...)`` —— 将末端执行器移动到世界坐标系中的目标位置。``gripper`` 取 ``"hold"``（默认）、``"open"`` 或 ``"close"``。
 - ``move_pose(xyz, target_pitch=..., target_yaw=..., ...)`` —— 同时调整末端位置和姿态。
 - ``rotate_wrist(target_yaw=... / delta_yaw=..., ...)`` —— 按绝对或相对 yaw 旋转腕部。
 - ``rotate_pitch(target_pitch=... / delta_pitch=..., ...)`` —— 按绝对或相对 pitch 倾斜夹爪。
-- ``set_gripper(gripper=..., steps=...)`` —— 保持末端姿态，并在指定步数内控制夹爪。
-- ``release(...)`` —— 打开夹爪。
+- ``set_gripper(command=..., steps=...)`` —— 保持末端姿态，并在指定步数内打开或闭合夹爪。
+- ``release(steps=...)`` —— 打开夹爪。
 
 物理动作工具执行后会推进环境，并记录新的状态和图像。
 

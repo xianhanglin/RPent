@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 
 import numpy as np
 from pydantic import Field
@@ -26,6 +26,18 @@ from robots.robotwin.env_client import RoboTwinEnvClient
 from robots.robotwin.robot_spec import MODEL_SPEC, ROBOTWIN_CAMERA_NAMES
 from robots.robotwin.vla_client import LingBotVLAClient
 from rpent.tools import ToolResult, tool
+from rpent.tools.core import (
+    Arm,
+    GripperMode,
+    GripperTarget,
+    WorldXYZ,
+    motion_result,
+    stop_reason,
+    wrap_angle,
+)
+
+# Orientation tolerance for reporting a yaw target as reached, radians.
+_YAW_TOL = 0.05
 
 
 def _qmult(left: np.ndarray, right: np.ndarray) -> np.ndarray:
@@ -40,6 +52,18 @@ def _qmult(left: np.ndarray, right: np.ndarray) -> np.ndarray:
         ],
         dtype=np.float64,
     )
+
+
+def _yaw_of(quat_wxyz: np.ndarray) -> float:
+    """World heading of the EEF X axis for a wxyz quaternion."""
+    w, x, y, z = quat_wxyz
+    return float(np.arctan2(2 * (x * y + w * z), 1 - 2 * (y * y + z * z)))
+
+
+def _rotate_about_world_z(quat_wxyz: np.ndarray, angle: float) -> np.ndarray:
+    """Compose a world-Z rotation before an EEF orientation."""
+    world_z = np.asarray([np.cos(angle / 2), 0.0, 0.0, np.sin(angle / 2)])
+    return _qmult(world_z, np.asarray(quat_wxyz, dtype=np.float64))
 
 
 class RoboTwinPrimitives:
@@ -284,38 +308,76 @@ class RoboTwinPrimitives:
             }
         )
 
-    @tool
-    def move_to(
+    @staticmethod
+    def _gripper_target(gripper: GripperMode) -> float | None:
+        """Native gripper target: ``0`` closed, ``1`` open, ``None`` keeps it."""
+        return {"hold": None, "open": 1.0, "close": 0.0}[gripper]
+
+    def _arm_pose(self, arm: Arm) -> np.ndarray:
+        return np.asarray(
+            self.env.last_info["robot_state"][f"{arm}_eef_pose"], dtype=np.float64
+        )
+
+    def _result(
         self,
         *,
-        arm: Literal["left", "right"],
-        xyz: Annotated[list[float], Field(min_length=3, max_length=3)],
-        quat: Annotated[list[float], Field(min_length=4, max_length=4)] | None = None,
-        gripper: float | None = None,
-        substeps: Annotated[int, Field(ge=0, json_schema_extra={"default": 25})] = 25,
+        arm: Arm,
+        reached: bool,
+        executed: int,
+        native_stop_reason: str,
+        **extra: Any,
     ) -> ToolResult:
-        """Plan and move one arm to a world-frame xyz and wxyz orientation. The native planner returns qpos waypoints executed with fresh state."""
+        """Report a RoboTwin action in the shared motion result shape."""
+        terminated = bool(self.env.terminated) or native_stop_reason == "native_success"
+        truncated = bool(self.env.truncated) or native_stop_reason == "budget_exhausted"
+        state = self.env.last_info["robot_state"]
+        return motion_result(
+            ok=reached,
+            stop_reason=stop_reason(
+                reached=reached, terminated=terminated, truncated=truncated
+            ),
+            steps_used=executed,
+            eef_xyz=self._arm_pose(arm)[:3],
+            gripper_opening=float(state[f"{arm}_gripper"]),
+            terminated=terminated,
+            truncated=truncated,
+            native_stop_reason=native_stop_reason,
+            **extra,
+        )
+
+    def _move_pose(
+        self,
+        *,
+        arm: Arm,
+        xyz: list[float],
+        quat: np.ndarray,
+        gripper: GripperMode,
+        substeps: int,
+        tol: float,
+        yaw_target: float | None = None,
+    ) -> ToolResult:
+        """Plan and execute a qpos path to a target end-effector pose."""
         if int(substeps) < 0:
             raise ValueError("substeps must be non-negative")
         self._check_cancelled()
-        state = self.env.last_info["robot_state"]
-        if quat is None:
-            key = "left_eef_pose" if arm == "left" else "right_eef_pose"
-            quat = np.asarray(state[key], dtype=np.float64)[3:].tolist()
         target = np.asarray([*xyz, *quat], dtype=np.float64)
         planned = self.env.plan_arm_path(arm, target)
         self._check_cancelled()
         if planned["status"] != "Success" or planned.get("position") is None:
-            return ToolResult(
-                data={
-                    "completed": False,
-                    "requested_steps": 0,
-                    "executed_steps": 0,
-                    "stop_reason": "plan_failed",
-                    "success": False,
-                    "plan_status": planned["status"],
-                    "hint": "target may be unreachable or in collision",
-                }
+            pose = self._arm_pose(arm)
+            return motion_result(
+                ok=False,
+                stop_reason="plan_failed",
+                steps_used=0,
+                eef_xyz=pose[:3],
+                gripper_opening=float(
+                    self.env.last_info["robot_state"][f"{arm}_gripper"]
+                ),
+                terminated=bool(self.env.terminated),
+                truncated=bool(self.env.truncated),
+                dist_m=float(np.linalg.norm(pose[:3] - np.asarray(xyz))),
+                plan_status=planned["status"],
+                hint="target may be unreachable or in collision",
             )
         path = np.asarray(planned["position"], dtype=np.float64)
         if substeps == 1:
@@ -323,74 +385,144 @@ class RoboTwinPrimitives:
         elif substeps >= 2 and len(path) > substeps:
             indices = np.linspace(0, len(path) - 1, substeps).astype(int)
             path = path[indices]
+        target_gripper = self._gripper_target(gripper)
         updates = [
-            {"arm": arm, "arm_qpos": waypoint, "gripper": gripper} for waypoint in path
+            {"arm": arm, "arm_qpos": waypoint, "gripper": target_gripper}
+            for waypoint in path
         ]
         execution = self.apply_qpos_updates(updates)
         executed = int(execution.get("executed_actions", 0))
         self.native_actions += executed
         self._check_cancelled()
-        status = execution["episode_status"]
-        final = self.env.last_info["robot_state"]
-        key = "left_eef_pose" if arm == "left" else "right_eef_pose"
-        final_pose = np.asarray(final[key], dtype=np.float64)
-        return ToolResult(
-            data={
-                **execution,
-                **self._completion(
-                    requested=len(updates), executed=executed, status=status
-                ),
-                "success": True,
-                "plan_status": planned["status"],
-                "waypoints": len(path),
-                "final_eef_xyz": final_pose[:3].tolist(),
-                "final_dist_m": float(
-                    np.linalg.norm(final_pose[:3] - np.asarray(xyz, dtype=np.float64))
-                ),
-            }
+        completion = self._completion(
+            requested=len(updates),
+            executed=executed,
+            status=execution["episode_status"],
+        )
+        pose = self._arm_pose(arm)
+        dist = float(np.linalg.norm(pose[:3] - np.asarray(xyz, dtype=np.float64)))
+        yaw_error = (
+            None if yaw_target is None else wrap_angle(yaw_target - _yaw_of(pose[3:]))
+        )
+        return self._result(
+            arm=arm,
+            reached=completion["completed"]
+            and dist <= tol
+            and (yaw_error is None or abs(yaw_error) <= _YAW_TOL),
+            executed=executed,
+            native_stop_reason=completion["stop_reason"],
+            dist_m=dist,
+            yaw_error=yaw_error,
+            plan_status=planned["status"],
+            waypoints=len(path),
+            episode_status=execution["episode_status"],
+        )
+
+    @tool
+    def move_to(
+        self,
+        *,
+        arm: Arm,
+        xyz: WorldXYZ,
+        gripper: GripperMode = "hold",
+        target_yaw: float | None = None,
+        quat: Annotated[list[float], Field(min_length=4, max_length=4)] | None = None,
+        substeps: Annotated[int, Field(ge=0, json_schema_extra={"default": 25})] = 25,
+        tol: float = 0.01,
+    ) -> ToolResult:
+        """Plan and move one arm to a world-frame xyz. Keeps the current orientation unless target_yaw or a full wxyz quat is given. The native planner returns qpos waypoints executed with fresh state.
+
+        Args:
+            arm: Arm to move
+            xyz: World-frame target [x, y, z] in meters
+            gripper: 'hold' keeps the current gripper target (default), 'open' opens, 'close' closes
+            target_yaw: Optional world-frame yaw target in radians; keeps the current tilt
+            quat: Optional full world-frame orientation, wxyz; excludes target_yaw
+            substeps: Maximum executed waypoints sampled from the planned path (default 25)
+            tol: Position tolerance for ok, m (default 0.01)
+        """
+        if target_yaw is not None and quat is not None:
+            raise ValueError("pass target_yaw or quat, not both")
+        current = self._arm_pose(arm)[3:]
+        if quat is not None:
+            orientation = np.asarray(quat, dtype=np.float64)
+        elif target_yaw is not None:
+            orientation = _rotate_about_world_z(
+                current, wrap_angle(target_yaw - _yaw_of(current))
+            )
+        else:
+            orientation = current
+        return self._move_pose(
+            arm=arm,
+            xyz=list(xyz),
+            quat=orientation,
+            gripper=gripper,
+            substeps=substeps,
+            tol=tol,
+            yaw_target=target_yaw,
         )
 
     @tool
     def rotate_wrist(
         self,
         *,
-        arm: Literal["left", "right"],
-        delta_yaw_deg: float,
-        gripper: float | None = None,
+        arm: Arm,
+        delta_yaw: float | None = None,
+        target_yaw: float | None = None,
+        gripper: GripperMode = "hold",
         substeps: Annotated[int, Field(ge=0, json_schema_extra={"default": 25})] = 25,
     ) -> ToolResult:
-        """Rotate one EEF about world Z by a relative angle in degrees."""
-        state = self.env.last_info["robot_state"]
-        key = "left_eef_pose" if arm == "left" else "right_eef_pose"
-        pose = np.asarray(state[key], dtype=np.float64)
-        yaw = np.deg2rad(float(delta_yaw_deg))
-        world_z = np.asarray([np.cos(yaw / 2), 0.0, 0.0, np.sin(yaw / 2)])
-        result = self.move_to(
+        """Rotate one EEF about world Z in place. Provide either delta_yaw (relative) or target_yaw (absolute).
+
+        Args:
+            arm: Arm to rotate
+            delta_yaw: Relative yaw delta, rad
+            target_yaw: Absolute world-frame yaw target, rad
+            gripper: 'hold' keeps the current gripper target (default), 'open' opens, 'close' closes
+            substeps: Maximum executed waypoints sampled from the planned path (default 25)
+        """
+        if (delta_yaw is None) == (target_yaw is None):
+            raise ValueError("pass exactly one of delta_yaw or target_yaw")
+        pose = self._arm_pose(arm)
+        start_yaw = _yaw_of(pose[3:])
+        goal = start_yaw + float(delta_yaw) if target_yaw is None else target_yaw
+        result = self._move_pose(
             arm=arm,
             xyz=pose[:3].tolist(),
-            quat=_qmult(world_z, pose[3:]).tolist(),
+            quat=_rotate_about_world_z(pose[3:], wrap_angle(goal - start_yaw)),
             gripper=gripper,
             substeps=substeps,
+            tol=0.01,
+            yaw_target=goal,
         )
-        result.data["requested_delta_yaw_deg"] = float(delta_yaw_deg)
+        result.data["start_yaw"] = round(start_yaw, 4)
         return result
 
     @tool
     def set_gripper(
         self,
         *,
-        arm: Literal["left", "right"],
-        val: Annotated[float, Field(ge=0, le=1)],
+        arm: Arm,
+        command: GripperTarget | Annotated[float, Field(ge=0, le=1)],
         steps: Annotated[int, Field(ge=1, json_schema_extra={"default": 10})] = 10,
     ) -> ToolResult:
-        """Linearly move one normalized gripper to val over 10 actions."""
+        """Move one gripper open, closed, or to an opening fraction (0 closed, 1 open) over `steps` native actions.
+
+        Args:
+            arm: Gripper's arm
+            command: 'open', 'close', or an opening fraction from 0 (closed) to 1 (open)
+            steps: Number of native actions (default 10)
+        """
         if int(steps) < 1:
             raise ValueError("steps must be at least 1")
         self._check_cancelled()
-        state = self.env.last_info["robot_state"]
-        current = float(state[f"{arm}_gripper"])
+        current = float(self.env.last_info["robot_state"][f"{arm}_gripper"])
+        target = (
+            self._gripper_target(command)
+            if isinstance(command, str)
+            else float(command)
+        )
         step_count = int(steps)
-        target = float(val)
         values = [
             current + (target - current) * index / step_count
             for index in range(1, step_count + 1)
@@ -400,33 +532,33 @@ class RoboTwinPrimitives:
         executed = int(execution.get("executed_actions", 0))
         self.native_actions += executed
         self._check_cancelled()
-        status = execution["episode_status"]
-        now = self.env.last_info["robot_state"]
-        return ToolResult(
-            data={
-                **execution,
-                **self._completion(
-                    requested=len(updates), executed=executed, status=status
-                ),
-                "success": True,
-                "gripper_val": float(now[f"{arm}_gripper"]),
-            }
+        completion = self._completion(
+            requested=len(updates),
+            executed=executed,
+            status=execution["episode_status"],
+        )
+        return self._result(
+            arm=arm,
+            reached=completion["completed"],
+            executed=executed,
+            native_stop_reason=completion["stop_reason"],
+            episode_status=execution["episode_status"],
         )
 
     @tool
     def release(
         self,
         *,
-        arm: Literal["left", "right"],
-        val: Annotated[float, Field(json_schema_extra={"default": 1.0})] = 1.0,
+        arm: Arm,
         steps: Annotated[int, Field(ge=1, json_schema_extra={"default": 10})] = 10,
     ) -> ToolResult:
-        """Open one gripper to 1.0 over 10 native actions."""
-        return self.set_gripper(
-            arm=arm,
-            val=val,
-            steps=steps,
-        )
+        """Open one gripper fully over `steps` native actions.
+
+        Args:
+            arm: Gripper's arm
+            steps: Number of native actions (default 10)
+        """
+        return self.set_gripper(arm=arm, command="open", steps=steps)
 
     def status(self) -> dict[str, Any]:
         """Return the native episode status plus action counters."""

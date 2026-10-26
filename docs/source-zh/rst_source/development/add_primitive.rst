@@ -52,6 +52,50 @@
 
 参数类型注解和 docstring 生成模型可见的 schema。Toolkit 校验参数，并在执行后通过 ``get_env_state`` 采集状态。``view_env_state``、``back_project`` 等读取工具使用 ``@tool(readonly=True)``。模块级工具可用 ``@tool(exclude=("state",))`` 排除内部资源参数，再通过 ``Tool.with_handler`` 绑定。三种 planner 共用注册后的工具声明。
 
+.. _shared-core-tools:
+
+共享核心工具
+------------
+
+机器人发布 ``move_to``、``rotate_wrist``、``set_gripper``、``release`` 或 ``view_env_state`` 时，应使用 ``rpent.tools.core`` 中的类型和结果构造函数声明，使同一次调用在所有机器人上含义一致：
+
+- 位置使用世界坐标系，单位为米；角度单位为弧度；四元数顺序为 ``[w, x, y, z]``；
+- yaw 指末端执行器 X 轴在世界 XY 平面内的朝向；
+- 运动工具接受 ``gripper: GripperMode``（``"hold"``、``"open"`` 或 ``"close"``），默认值为 ``"hold"``，即保持已抓取的物体；
+- ``set_gripper`` 接受 ``command: GripperTarget``（``"open"`` 或 ``"close"``），``release`` 将夹爪完全打开；
+- 夹爪开度为 0（闭合）到 1（全开）之间的比例；
+- 只有多臂机器人才提供 ``arm: Arm`` 参数。
+
+运动和夹爪工具的结果用 ``motion_result`` 构造，机器人特有的字段作为额外关键字参数传入。``view_env_state`` 用 ``observation_result`` 构造，每张嵌入图像对应一个 ``CameraView``：
+
+.. code-block:: python
+
+   from rpent.tools.core import GripperMode, WorldXYZ, motion_result, stop_reason
+
+   class MyRobotPrimitives:
+       @tool
+       def move_to(self, xyz: WorldXYZ, gripper: GripperMode = "hold") -> ToolResult:
+           """Move the end effector to a world-frame position.
+
+           Args:
+               xyz: World-frame target [x, y, z] in meters
+               gripper: 'hold' keeps the current gripper command (default), 'open' opens, 'close' closes
+           """
+           reached, steps = self._servo(xyz, self._gripper_command(gripper))
+           return motion_result(
+               ok=reached,
+               stop_reason=stop_reason(
+                   reached=reached, terminated=self._env.terminated, truncated=False
+               ),
+               steps_used=steps,
+               eef_xyz=self._env.eef_pos,
+               gripper_opening=self._env.gripper_opening,
+               terminated=self._env.terminated,
+               truncated=False,
+           )
+
+机器人可以为自身控制器添加可选参数，例如单步限幅和容差。LIBERO、RoboTwin 和 RoboCasa 采用这些约定后的工具变化见 :doc:`../resources/core_tool_migration`。
+
 .. _add-primitive-model-based:
 
 添加一个 VLA（或其他基于模型的原语）

@@ -331,9 +331,10 @@ returns the new state, log, artifact names, and embedded images:
 
 // Scripted EEF servo. action_scale=0.05 is the env's units; step_clip caps
 // per-step Δxyz (m) BEFORE division by action_scale — smaller = slower.
-move_to({"xyz": [x, y, z], "gripper": -1,
+// gripper: "hold" (default) keeps the last command, "open" opens, "close" closes.
+move_to({"xyz": [x, y, z], "gripper": "open",
          "tol": 0.012, "step_clip": 0.025, "max_steps": 80,
-         "action_scale": 0.05, "target_yaw": null})   // gripper: -1 open, +1 close
+         "action_scale": 0.05, "target_yaw": null})
 
 // Pi0.5 closed-loop pick. Grasp-only — no oracle/tracking arg (Rule 1).
 // You judge the grasp from gripper width + wrist cam (Rule 1b).
@@ -345,24 +346,24 @@ pi0_pick({"prompt": "pick up the X", "max_chunks": 20,
 pi0_doubled({"prompt": "turn off the stove", "max_chunks": 20})
 
 // Open gripper to place. Triggers libero termination if the On/In predicate met.
-release({"max_steps": 20})
+release({"steps": 20})
 
 // Hold pose + drive gripper. Use to firm a grip mid-carry.
-set_gripper({"gripper": 1, "steps": 5})   // -1 open, +1 close
+set_gripper({"command": "close", "steps": 5})   // "open" or "close"
 
-// Wrist yaw (world-z). Provide target_yaw (absolute) OR delta_yaw (relative).
-rotate_wrist({"target_yaw": 0.0, "gripper": 1,
+// Wrist yaw (world-z). Provide delta_yaw (relative) OR target_yaw (absolute).
+rotate_wrist({"target_yaw": 0.0, "gripper": "hold",
               "max_steps": 40, "tol": 0.02, "step_clip": 0.10})
 
 // Tilt eef pitch (axis-angle X). Cavity entry / micro-aiming. target_pitch OR
 // delta_pitch. Use before threading a narrow opening whose face normal is ±y.
-rotate_pitch({"target_pitch": 0.9, "gripper": 1,
+rotate_pitch({"target_pitch": 0.9, "gripper": "hold",
               "max_steps": 40, "tol": 0.02, "step_clip": 0.10})
 
 // Co-vary xyz + pitch + yaw — threads cabinet-front IK singularity that move_to
-// walls at. gripper defaults to -1 (OPEN) — pass gripper:1 while holding.
+// walls at.
 move_pose({"xyz": [x, y, z], "target_pitch": 0.0, "target_yaw": 0.0,
-           "gripper": 1, "step_clip": 0.02, "pitch_step": 0.08, "yaw_step": 0.08,
+           "gripper": "hold", "step_clip": 0.02, "pitch_step": 0.08, "yaw_step": 0.08,
            "tol": 0.012, "ori_tol": 0.05, "max_steps": 150})
 
 // SAM3-grounded localization — does NOT move the robot and does NOT
@@ -438,7 +439,7 @@ A typical bowl→plate cell looks like:
    grasping.
 5. `pi0_pick` with the right prompt (start "pick up the {object}", escalate per
    the Pi0 ladder — see below). Confirm the grasp via gripper + wrist (Rule 1b).
-6. `set_gripper({"gripper":1,"steps":5})` to firm the grip.
+6. `set_gripper({"command":"close","steps":5})` to firm the grip.
 7. Localize the placement region (basket / plate / drawer slot) the same way.
 8. `move_to([place_x, place_y, carry_z])` to traverse at constant height.
 9. Optionally descend `move_to([place_x, place_y, place_z])`.
@@ -486,7 +487,7 @@ images —
 you do **not** need a separate read. When you need an older step, call
 `view_env_state({"step": NN})` (use `step: -1` for the latest):
 
-1. Check `log.result.success`, `log.result.final_dist_m`,
+1. Check `log.result.ok`, `log.result.dist_m`,
   `log.result.peak_lift_m`, etc.
 2. Inspect the embedded `agentview_high.png` image → visual confirmation; pick
    pixels for any new localization.
@@ -507,8 +508,8 @@ returned the new state.
   `terminated=false` and the object
   is no longer where you `release`d it. `release`, re-pre-pos above it,
   `pi0_pick` again, traverse again.
-- **OSC stuck.** `move_to` returns `log.result.final_dist_m > 0.05` at
-  `log.result.max_steps` and
+- **OSC stuck.** `move_to` returns `log.result.ok=false` with
+  `log.result.dist_m > 0.05` after its full step budget and
   same xy twice → try `rotate_pitch`, split into more waypoints, or
   `move_pose` (co-varying) for the cabinet-front singularity.
 - **Placement off because localization was wrong.** The release puts the

@@ -41,6 +41,7 @@ from robots.libero.flash.prompts import build as prompt_for
 from robots.libero.memory import replay_directory
 from rpent.robots.components.molmo_client import MolmoClient
 from rpent.session import EnvState
+from rpent.tools.core import TOOL_SPEC_VERSION, migrate_legacy_plan
 
 #: ``<family>_<suite>_t<task>_s<seed>``, the tag the CLI builds per cell.
 _CELL = re.compile(r"^(10|goal|object|spatial)_(task|swap)_t(\d+)_s(\d+)$")
@@ -219,8 +220,15 @@ def plans(root: Path) -> Path:
 
 
 def load(root: Path, plan_name: str) -> dict:
-    """Read one program: its plan, and the anchors its coordinates were written against."""
-    plan = json.loads((root / f"{plan_name}_plan.json").read_text())["plan"]
+    """Read one program: its plan, and the anchors its coordinates were written against.
+
+    Plans generated before the shared core tool conventions carry no
+    ``tool_spec`` and are translated to current tool calls.
+    """
+    document = json.loads((root / f"{plan_name}_plan.json").read_text())
+    plan = document["plan"]
+    if document.get("tool_spec") != TOOL_SPEC_VERSION:
+        plan = migrate_legacy_plan("libero", plan)
     anchors = json.loads((root / f"{plan_name}_anchors.json").read_text())["anchors"]
     return {
         "plan": plan,
@@ -331,7 +339,7 @@ def replay(
                         round(float(coarse[1]), 4),
                         float(hover),
                     ],
-                    "gripper": -1,
+                    "gripper": "open",
                     "step_clip": 0.02,
                     "max_steps": 150,
                     "tol": 0.012,
@@ -351,6 +359,9 @@ def replay(
 
     offset = np.zeros(2)
     held_phrase = "object"
+    # Moves default to "hold", so whether a move carries an object follows from
+    # the gripper commands before it rather than from the move alone.
+    holding = False
     recent: list[tuple[str, dict]] = []
     skip_suffix = False
     for entry in plan:
@@ -364,6 +375,7 @@ def replay(
             # whatever an earlier transaction put down.
             if name == "release":
                 skip_suffix = False
+                holding = False
                 recent.clear()
                 continue
             if name != "pi0_pick":
@@ -383,8 +395,10 @@ def replay(
                 break
             if attached:
                 target = live[phrase] + np.array(entry["offset"])
-            held = arguments.get("gripper", -1) == 1
-            if held:
+            gripper = arguments.get("gripper", "hold")
+            if gripper != "hold":
+                holding = gripper == "close"
+            if holding:
                 target = target - offset
             if max(abs(target[0]), abs(target[1])) > REACH:
                 continue
@@ -407,6 +421,8 @@ def replay(
                 arguments.update(FLASH_PICK_THRESHOLDS)
             raw = execute(toolkit, name, arguments)
             look()
+            if name == "pi0_pick":
+                holding = True
             if name == "pi0_pick" and not pick_succeeded(raw):
                 for _ in range(PICK_ATTEMPTS - 1):
                     if finished():
@@ -421,6 +437,7 @@ def replay(
                     note("      pick unconfirmed, skipping its carry")
                     skip_suffix = True
         elif name == "set_gripper":
+            holding = arguments.get("command") == "close"
             execute(toolkit, name, arguments)
             held_step = look()
             body = held_body(molmo, state, held_step, prompt_for("held", held_phrase))
@@ -433,6 +450,7 @@ def replay(
                 offset = np.zeros(2)
         elif name == "release":
             execute(toolkit, name, arguments)
+            holding = False
             offset = np.zeros(2)
             look()
         else:
